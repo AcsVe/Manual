@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComb
 
 from ..core.db import BLOCK_KINDS, SECTION_KINDS, STATUSES
 from ..core.richtext import clean
-from ..core.templates import TABLE_PRESETS, policy_blocks, table_data
+from ..core import doctor
+from ..core.templates import TABLE_PRESETS, layout_with_defaults, policy_blocks, table_data
 from .common import L, confirm, error, info
 from .library import asset_pixmap, pick_asset
 from .theme import SizedDialog, a11y, size_tree, button, card, field, fit, form_grid, hint, icon, icon_button, ltr, muted, name_buttons
@@ -78,6 +79,28 @@ class RichEdit(QTextEdit):
         return clean(self.toHtml())
 
 
+SYMBOLS = (
+    (('علامات', 'Marks'), (('✓', ('صح', 'Check')), ('✔', ('صح غامق', 'Heavy check')), ('✗', ('خطأ', 'Cross')),
+                           ('☐', ('مربع فارغ', 'Empty box')), ('☑', ('مربع مؤشَّر', 'Checked box')), ('☒', ('مربع مشطوب', 'Crossed box')),
+                           ('★', ('نجمة', 'Star')), ('⚠', ('تنبيه', 'Warning')), ('ℹ', ('معلومة', 'Information')))),
+    (('نقاط وأشكال', 'Bullets and shapes'), (('•', ('نقطة', 'Bullet')), ('▪', ('مربع صغير', 'Small square')), ('■', ('مربع', 'Square')),
+                                             ('●', ('دائرة', 'Circle')), ('○', ('دائرة فارغة', 'Empty circle')), ('◆', ('معيّن', 'Diamond')),
+                                             ('❖', ('زخرفة', 'Ornament')), ('➢', ('رأس سهم', 'Arrowhead')), ('►', ('مثلث', 'Triangle')))),
+    (('أسهم', 'Arrows'), (('←', ('يسار', 'Left')), ('→', ('يمين', 'Right')), ('↑', ('أعلى', 'Up')), ('↓', ('أسفل', 'Down')),
+                         ('↔', ('اتجاهان', 'Both ways')), ('⇐', ('يسار مزدوج', 'Double left')), ('⇒', ('يمين مزدوج', 'Double right')))),
+    (('رياضيات ووحدات', 'Maths and units'), (('±', ('زائد أو ناقص', 'Plus or minus')), ('×', ('ضرب', 'Times')), ('÷', ('قسمة', 'Divide')),
+                                             ('≤', ('أصغر أو يساوي', 'Less or equal')), ('≥', ('أكبر أو يساوي', 'Greater or equal')),
+                                             ('≠', ('لا يساوي', 'Not equal')), ('≈', ('يقارب', 'About')), ('°', ('درجة', 'Degree')),
+                                             ('٪', ('نسبة مئوية عربية', 'Arabic percent')), ('%', ('نسبة مئوية', 'Percent')), ('‰', ('في الألف', 'Per mille')))),
+    (('قانونية وعملات', 'Legal and currency'), (('©', ('حقوق النشر', 'Copyright')), ('®', ('علامة مسجلة', 'Registered')),
+                                                ('™', ('علامة تجارية', 'Trade mark')), ('§', ('مادة', 'Section')), ('¶', ('فقرة', 'Paragraph')),
+                                                ('€', ('يورو', 'Euro')), ('$', ('دولار', 'Dollar')), ('£', ('جنيه', 'Pound')))),
+    (('ترقيم عربي', 'Arabic punctuation'), (('،', ('فاصلة', 'Comma')), ('؛', ('فاصلة منقوطة', 'Semicolon')),
+                                            ('؟', ('علامة استفهام', 'Question mark')), ('«', ('قوس اقتباس فاتح', 'Opening quote')),
+                                            ('»', ('قوس اقتباس غالق', 'Closing quote')), ('ـ', ('تطويل', 'Tatweel')))),
+)
+
+
 class FormatBar(QWidget):
     """Bold, italic, underline, colour and link for the text box that has the focus."""
 
@@ -106,9 +129,25 @@ class FormatBar(QWidget):
         link.clicked.connect(self.link)
         plain = icon_button('reset', L('إزالة التنسيق', 'Clear formatting'))
         plain.clicked.connect(self.plain)
-        for b in (col, link, plain):
+        sym = QToolButton()
+        sym.setText('Ω')
+        sym.setToolTip(L('إدراج رمز', 'Insert a symbol'))
+        a11y(sym, L('إدراج رمز', 'Insert a symbol'))
+        menu = QMenu(sym)
+        for (ar, en), chars in SYMBOLS:
+            sub = menu.addMenu(L(ar, en))
+            for ch, (nar, nen) in chars:
+                sub.addAction(f'{ch}    {L(nar, nen)}', lambda c=ch: self.insert(c))
+        sym.setMenu(menu)
+        sym.setPopupMode(QToolButton.InstantPopup)
+        for b in (col, link, plain, sym):
             lay.addWidget(b)
         lay.addStretch(1)
+
+    def insert(self, ch):
+        if self.target:
+            self.target.insertPlainText(ch)
+            self.target.setFocus()
 
     def set_target(self, ed):
         self.target = ed
@@ -989,8 +1028,12 @@ class EditorTab(QWidget):
         self.wf_back = button(L('إعادة إلى مسودة', 'Back to draft'), 'reset')
         self.wf_back.clicked.connect(lambda: self.set_status('draft'))
         self.saved_label = muted('')
+        self.check_btn = button(L('فحص الدليل', 'Check the manual'), 'shield',
+                                tip=L('يفحص الدليل كاملاً: الهوامش والجداول واتجاه النص والقوائم والرموز وفواصل الصفحات وأرقامها',
+                                      'Checks the whole manual: margins, tables, text direction, lists, symbols, page breaks and numbers'))
+        self.check_btn.clicked.connect(lambda: self.ctx.window and self.ctx.window.open_doctor(run=True))
         actions = QHBoxLayout()
-        for w in (self.save_btn, self.rev_btn, self.wf_review, self.wf_approve, self.wf_back):
+        for w in (self.save_btn, self.rev_btn, self.wf_review, self.wf_approve, self.wf_back, self.check_btn):
             actions.addWidget(w)
         actions.addStretch(1)
         actions.addWidget(self.saved_label)
@@ -1139,6 +1182,34 @@ class EditorTab(QWidget):
         if self.preview.scope.currentData() == 'section':
             self.refresh_preview(force=True)
 
+    def _reload_blocks(self):
+        _clear_layout(self.block_list)
+        self.blocks = []
+        for b in self.db.blocks(self.sid):
+            self._append_block(b)
+        size_tree(self.scroll)
+
+    def goto(self, sid, b=None, path=None):
+        """Opens a section and brings one of its blocks into view (used by the checker)."""
+        if self.dirty:
+            self.save(quiet=True)
+        self.reload_tree(select=sid)
+        if self.sid != sid or b is None or b >= len(self.blocks):
+            return
+        w = self.blocks[b]
+        side = (path or ['ar'])[-1] if path and path[-1] in ('ar', 'en') else 'ar'
+        target = getattr(w, side, None)
+
+        def show():
+            self.scroll.ensureWidgetVisible(w, 40, 80)
+            w.setProperty('flash', True)
+            w.style().unpolish(w)
+            w.style().polish(w)
+            if target is not None and hasattr(target, 'setFocus'):
+                target.setFocus()
+            QTimer.singleShot(2500, lambda: (w.setProperty('flash', False), w.style().unpolish(w), w.style().polish(w)))
+        QTimer.singleShot(60, show)
+
     def _append_block(self, b, at=None):
         w = BlockWidget(self.ctx, b)
         w.changed.connect(self._touch)
@@ -1165,9 +1236,18 @@ class EditorTab(QWidget):
             return
         data = self.form.value()
         self.db.save_section(data, self.sid)
-        self.db.replace_blocks(self.sid, [w.value() for w in self.blocks])
+        blocks = [w.value() for w in self.blocks]
+        fixed = 0
+        prefs = doctor.load_prefs(self.db)
+        if prefs.get('auto_save'):                 # the checker's safe text fixes, when the user turned them on
+            rules = [r for r in doctor.AUTO_ON_SAVE if r not in (prefs.get('disabled') or [])]
+            lm = layout_with_defaults(self.db.manual(self.mid)['layout'])['lang_mode']
+            blocks, fixed = doctor.autofix_blocks(blocks, lm, rules)
+        self.db.replace_blocks(self.sid, blocks)
+        if fixed:
+            self._reload_blocks()
         self.dirty = False
-        self.saved_label.setText(L('حُفظ', 'Saved'))
+        self.saved_label.setText(L(f'حُفظ، وضُبط {fixed} موضعاً', f'Saved; {fixed} place(s) tidied') if fixed else L('حُفظ', 'Saved'))
         it = self.tree.currentItem()
         if it:
             it.setText(0, self._label(self.db.section(self.sid)))

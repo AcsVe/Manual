@@ -77,8 +77,10 @@ def clean(text):
     """Safe inline HTML for a block side. Plain text keeps its line breaks."""
     if not text:
         return ''
-    if '<' not in text:
+    if '<' not in text and not re.search(r'&(?:#\d+|#x[0-9a-fA-F]+|[a-zA-Z]+);', text):
         return escape(text, quote=False).replace('\n', '<br>')
+    if '<' not in text:                        # character references without tags: read as HTML, lines kept
+        text = text.replace('\n', '<br>')
     if 'qrichtext' in text or '<body' in text.lower():           # Qt's full document → its body only
         m = re.search(r'<body[^>]*>(.*)</body>', text, re.S | re.I)
         text = m.group(1) if m else text
@@ -96,7 +98,8 @@ def plain(text):
     if not text:
         return ''
     if '<' not in text:
-        return text
+        from html import unescape
+        return unescape(text) if '&' in text else text
     s = re.sub(r'<br\s*/?>', '\n', clean(text))
     s = re.sub(r'<[^>]+>', '', s)
     from html import unescape

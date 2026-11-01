@@ -167,11 +167,26 @@ def import_into(parent, ctx, mid, parent_sid):
         QGuiApplication.restoreOverrideCursor()
         error(parent, L('تعذّر الاستيراد:', 'The import failed:') + f'\n{e}')
         return False
+    from ..core import doctor
+    prefs = doctor.load_prefs(ctx.db)
+    tidied = 0
+    if prefs.get('auto_import'):            # the checker's safe fixes on what came in
+        rules = [r for r in doctor.AUTO_ON_IMPORT if r not in (prefs.get('disabled') or [])]
+        tidied = doctor.autofix_sections(ctx.db, mid, ids, rules)
+    left = [x for x in doctor.check(ctx.db, mid, prefs, ctx.workflow, only=set(ids)) if x['sev'] in ('error', 'warning')]
     QGuiApplication.restoreOverrideCursor()
     blocks = sum(len(s['blocks']) for s in secs)
-    ctx.db.audit('import', file=os.path.basename(path), sections=len(ids))
-    info(parent, L(f'استُورد {len(ids)} قسماً و{blocks} كتلة و{len(imgs)} صورة. راجعها في المحرر.',
-                   f'Imported {len(ids)} sections, {blocks} blocks and {len(imgs)} images. Review them in the editor.'))
+    ctx.db.audit('import', file=os.path.basename(path), sections=len(ids), tidied=tidied)
+    text = L(f'استُورد {len(ids)} قسماً و{blocks} كتلة و{len(imgs)} صورة.', f'Imported {len(ids)} sections, {blocks} blocks and {len(imgs)} images.')
+    if tidied:
+        text += L(f' ضبط المدقق {tidied} موضعاً تلقائياً.', f' The checker tidied {tidied} place(s).')
+    if left and confirm(parent, text + L(f'\n\nبقيت {len(left)} ملاحظة (أخطاء وتحذيرات) تحتاج إلى مراجعة. هل تريد عرضها في المدقق؟',
+                                          f'\n\n{len(left)} point(s) (errors and warnings) need a look. Show them in the checker?')):
+        if ctx.window:                      # after the caller has opened the manual
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(400, lambda: ctx.window.open_doctor(run=True))
+        return True
+    info(parent, text + L(' راجعها في المحرر.', ' Review them in the editor.'))
     return True
 
 

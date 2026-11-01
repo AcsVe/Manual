@@ -1,0 +1,3 @@
+Tajawal, Cairo, Noto Naskh Arabic, Amiri — @fontsource packages, SIL Open Font License 1.1 (OFL-LICENSE.txt).
+symbols-1.woff2 — Noto Sans Symbols (Google), symbols subset, SIL OFL 1.1.
+symbols-2.woff2, symbols-math.woff2 — Noto Sans Symbols 2 (Google), symbols and math subsets, SIL OFL 1.1.

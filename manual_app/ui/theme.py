@@ -53,6 +53,7 @@ QTabBar::tab:hover:!selected {{ color: {C['deep']}; background: {C['soft']}; }}
 QGroupBox {{ background: {C['card']}; border: 1px solid {C['border']}; border-radius: 10px; margin-top: 24px;
             padding: 10px 12px 12px 12px; font-weight: 600; color: {C['text']}; }}
 QGroupBox[plain="true"] {{ margin-top: 8px; padding-top: 12px; }}
+QFrame[flash="true"] {{ border: 2px solid #F28C28; border-radius: 8px; background: #FFF7EC; }}
 QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; left: 10px; right: 10px;
                    padding: 2px 4px; color: {C['deep']}; }}
 QGroupBox QLabel {{ font-weight: normal; }}

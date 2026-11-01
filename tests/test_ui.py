@@ -25,7 +25,7 @@ def window(tmp_path, monkeypatch, manual, db):
 
 def test_every_page_builds(window):
     for page in (window.home, window.editor, window.org, window.compliance, window.design, window.library,
-                 window.export, window.users, window.settings):
+                 window.doctor, window.export, window.users, window.settings):
         window.show_page(page)
     assert window.editor.tree.topLevelItemCount() > 5
 
@@ -41,6 +41,24 @@ def test_editor_edits_and_saves(window, db, manual):
     ed.save()
     bl = db.blocks(v['id'])
     assert bl[0]['ar'] == 'نص جديد' and bl[0]['en'] == 'New text' and bl[-1]['kind'] == 'table'
+
+
+def test_checker_page_fixes_and_undoes(window, db, manual):
+    v = next(s for s in db.sections(manual) if s['title_en'] == 'Vision')
+    db.replace_blocks(v['id'], [{'kind': 'paragraph', 'ar': 'نص\u200f  هنا', 'en': 'text'}])
+    page = window.doctor
+    page.measure.setChecked(False)
+    page.load_manual(manual)
+    page.run(measure=False)
+    rules = [x['rule'] for x in page.all_issues()]
+    assert 'bidi_marks' in rules and page.table.model.rowCount() == len(rules)
+    i = rules.index('bidi_marks')
+    page.show_issue(i)
+    assert page.ed_ar.isVisibleTo(page) and 'هنا' in page.ed_ar.toPlainText()
+    page.fix_all_safe()
+    assert db.blocks(v['id'])[0]['ar'] == 'نص هنا'
+    page.undo()
+    assert db.blocks(v['id'])[0]['ar'] == 'نص\u200f  هنا'
 
 
 def test_controls_have_accessible_names(window):

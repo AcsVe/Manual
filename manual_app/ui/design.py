@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBo
                                QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
 from ..core.html import DEFAULT_DISCLAIMER
-from ..core.templates import (DEFAULT_LAYOUT, FONTS, HEADER_STYLES, LANG_MODES, PAGE_SIZES, TOKENS,
+from ..core.templates import (DEFAULT_LAYOUT, FONTS, FRONT_NUMBERING, HEADER_STYLES, LANG_MODES, PAGE_DIGITS,
+                              PAGE_NUMBER_FORMATS, PAGE_SIZES, TOKENS,
                               layout_with_defaults)
 from .common import L, info
 from .library import asset_pixmap, pick_asset
@@ -239,6 +240,37 @@ class DesignTab(QWidget):
         hf = card(L('الترويسة والتذييل والخلفيات', 'Header, footer & backgrounds'))
         hf.setLayout(hg)
 
+        # page numbers
+        self.pn_digits = QComboBox()
+        for k, (ar, en) in PAGE_DIGITS.items():
+            self.pn_digits.addItem(L(ar, en), k)
+        self.pn_front = QComboBox()
+        for k, (ar, en) in FRONT_NUMBERING.items():
+            self.pn_front.addItem(L(ar, en), k)
+        self.pn_start = QSpinBox()
+        self.pn_start.setRange(1, 999)
+        self.pn_cover = QCheckBox(L('يُحسب الغلاف صفحةً أولى', 'The cover counts as page one'))
+        self.pn_format = QComboBox()
+        self.pn_format.addItem(L('اختيار صيغة جاهزة…', 'Choose a ready format…'), '')
+        for k, (ar, en, _tpl) in PAGE_NUMBER_FORMATS.items():
+            self.pn_format.addItem(L(ar, en), k)
+        self.pn_format.activated.connect(self._number_format)
+        for w, n in ((self.pn_digits, 260), (self.pn_front, 280), (self.pn_start, 90), (self.pn_format, 220)):
+            fit(w, n)
+        ng = form_grid()
+        field(ng, 0, 0, L('شكل الأرقام', 'Digits'), self.pn_digits)
+        field(ng, 0, 2, L('الصفحات التمهيدية', 'Front matter pages'), self.pn_front,
+              desc=L('التنويه وضبط الوثيقة والفهرس قبل أول قسم من المحتوى', 'The notice, document control and contents before the first content section'))
+        field(ng, 1, 0, L('يبدأ ترقيم المحتوى من', 'Content numbering starts at'), self.pn_start)
+        ng.addWidget(self.pn_cover, 1, 3)
+        field(ng, 2, 0, L('صيغة رقم الصفحة في التذييل', 'Page number format in the footer'), self.pn_format, 3)
+        ng.addWidget(hint(L('عبارة «من 20» تعدّ صفحات المحتوى المرقّمة فقط، وأرقام الفهرس تتبع شكل الأرقام نفسه.',
+                            '«of 20» counts the numbered content pages only, and the contents page numbers use the same digits.')), 3, 1, 1, 3)
+        ng.setColumnStretch(1, 1)
+        ng.setColumnStretch(3, 1)
+        nbox = card(L('ترقيم الصفحات', 'Page numbering'))
+        nbox.setLayout(ng)
+
         # colours
         self.colors = {}
         cg = QGridLayout()
@@ -267,7 +299,7 @@ class DesignTab(QWidget):
         il = QVBoxLayout(inner)
         il.setContentsMargins(0, 0, 0, 0)
         il.addLayout(row)
-        for b in (ident, page, hf, cbox):
+        for b in (ident, page, hf, nbox, cbox):
             il.addWidget(b)
         il.addStretch(1)
         lay = QHBoxLayout(self)
@@ -321,8 +353,25 @@ class DesignTab(QWidget):
         self.f_end.edit.setText(f.get('end') or '')
         self.cover_style.setCurrentIndex(max(0, self.cover_style.findData((lay.get('cover') or {}).get('style', 'wave'))))
         self.page_bg_op.setValue(int(float(lay.get('page_bg_opacity') or 0.06) * 100))
+        pn = lay['page_numbers']
+        self.pn_digits.setCurrentIndex(max(0, self.pn_digits.findData(pn.get('digits', 'latin'))))
+        self.pn_front.setCurrentIndex(max(0, self.pn_front.findData(pn.get('front', 'same'))))
+        self.pn_start.setValue(int(pn.get('start') or 1))
+        self.pn_cover.setChecked(bool(pn.get('count_cover', True)))
+        self.pn_format.setCurrentIndex(0)
         self.color_values = dict(lay['colors'])
         self._paint_colors()
+
+    def _number_format(self, i):
+        key = self.pn_format.itemData(i)
+        if not key:
+            return
+        tpl = PAGE_NUMBER_FORMATS[key][2]
+        for box in (self.f_start, self.f_center, self.f_end):          # the page number moves, the rest stays
+            if '{page}' in box.text():
+                box.edit.setText(tpl)
+                return
+        (self.f_end if not self.f_end.text() else self.f_center).edit.setText(tpl)
 
     def _asset_labels(self):
         pm = asset_pixmap(self.db, self.assets.get('logo'), 64)
@@ -384,6 +433,8 @@ class DesignTab(QWidget):
                        'end': self.f_end.text()},
             'cover': dict(lay.get('cover') or {}, style=self.cover_style.currentData(), bg_id=self.assets.get('cover')),
             'page_bg_id': self.assets.get('page'), 'page_bg_opacity': self.page_bg_op.value() / 100,
+            'page_numbers': {'digits': self.pn_digits.currentData(), 'front': self.pn_front.currentData(),
+                             'start': self.pn_start.value(), 'count_cover': self.pn_cover.isChecked()},
         })
         meta = dict(m.get('meta') or {}, prepared_by=self.prepared.text().strip(), reviewed_by=self.reviewed.text().strip(),
                     approved_by=self.approved.text().strip(), first_draft=self.first_draft.text().strip(),

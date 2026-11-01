@@ -85,8 +85,10 @@ class ExportTab(QWidget):
             return False
         if not self.ctx.license().can_export:
             self.ctx.license_blocked(self)
-            return self.ctx.license(refresh=True).can_export
-        return True
+            if not self.ctx.license(refresh=True).can_export:
+                return False
+        from .doctor import check_before_export
+        return check_before_export(self, self.ctx, self.mid)
 
     def _path(self, ext, filt):
         m = self.db.manual(self.mid)
@@ -115,9 +117,18 @@ class ExportTab(QWidget):
         src = write_html(html, os.path.join(self.ctx.data_dir, 'export'), 'export.html')
         self.job = PdfJob(src, path, page_size_mm(self.db.manual(self.mid)))
         self.job.progress.connect(lambda n: self.state.setText(L(f'جارٍ ترتيب الصفحات… {n}', f'Laying out the pages… {n}')))
-        self.job.finished.connect(lambda ok, msg: self._done(path) if ok else (self.progress.hide(), error(self, L('تعذّر إنشاء PDF.', 'The PDF could not be created.') + f'\n{msg}')))
+        self.job.finished.connect(lambda ok, msg: self._pdf_done(path) if ok else (self.progress.hide(), error(self, L('تعذّر إنشاء PDF.', 'The PDF could not be created.') + f'\n{msg}')))
         self.progress.show()
         self.job.start()
+
+    def _pdf_done(self, path):
+        missing = self.job.missing if self.job else 0
+        self._done(path)
+        if missing:
+            error(self, L(f'أُنشئ الملف، لكن {missing} نصاً لم يصل إلى الصفحات (توقف ترتيب الصفحات قبل نهاية الدليل). '
+                          'افحص الدليل في «المدقق» مع قياس الصفحات لمعرفة الموضع وإصلاحه.',
+                          f'The file was created, but {missing} text(s) did not reach the pages (the page layout stopped before '
+                          'the end of the manual). Check the manual in the «Checker» with page measuring to find and fix the place.'))
 
     def export_docx(self):
         if not self._allowed():

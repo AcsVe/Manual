@@ -17,7 +17,13 @@ import base64
 import os
 import re
 import unicodedata
-from html import escape
+from html import escape as _escape
+
+
+def escape(text, quote=False):
+    """Text as HTML without turning quotes into character references (they are plain text)."""
+    return _escape(text, quote=quote)
+
 
 AR = re.compile(r'[؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]')
 LATIN = re.compile(r'[A-Za-z]')
@@ -175,7 +181,8 @@ def import_docx(path):
             current_entry[0] = last_hit[0] = ahead[0]
             return ahead[0]
         return None
-    index_tables = {id(t._tbl) for t in _front_tables(doc)}
+    # the elements themselves are kept: lxml reuses the identity of an element nobody holds
+    index_tables = [t._tbl for t in _front_tables(doc)]
     for child in body.iterchildren():
         tag = child.tag.split('}')[-1]
         if tag == 'p':
@@ -228,7 +235,7 @@ def import_docx(path):
                 _add_text(sections[-1], 'paragraph', text, html)
         elif tag == 'tbl':
             t = Table(child, doc)
-            if id(t._tbl) in index_tables:
+            if any(t._tbl is x for x in index_tables):
                 continue                                       # the old index: the program builds its own
             rows = [[c for c in r.cells] for r in t.rows]
             if not rows:

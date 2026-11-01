@@ -20,6 +20,23 @@ DEFAULT_LAYOUT = {
     'cover': {'style': 'wave', 'bg_id': None, 'bg_opacity': 1.0},
     'policy_footer': True,              # «responsible to maintain» + change history at the end of every policy
     'draft_mark': True,                 # sections not yet approved carry a «draft» mark (when the workflow is on)
+    # page numbers: digits latin (1 2 3) | arabic (١ ٢ ٣); front matter (disclaimer, document control, contents)
+    # numbered on with the rest (same), in small roman figures (roman) or not numbered (hidden) — the body then
+    # starts again at «start»; count_cover: the cover counts as page 1
+    'page_numbers': {'digits': 'latin', 'front': 'same', 'start': 1, 'count_cover': True},
+}
+FRONT_KINDS = ('cover', 'disclaimer', 'doc_control', 'toc')
+PAGE_DIGITS = {'latin': ('أرقام لاتينية (1، 2، 3)', 'Western digits (1, 2, 3)'),
+               'arabic': ('أرقام عربية مشرقية (١، ٢، ٣)', 'Arabic-Indic digits (١, ٢, ٣)')}
+FRONT_NUMBERING = {'same': ('متصل مع بقية الدليل', 'Continuous with the rest of the manual'),
+                   'roman': ('أرقام رومانية صغيرة (i، ii، iii)', 'Small roman figures (i, ii, iii)'),
+                   'hidden': ('دون أرقام', 'Not numbered')}
+PAGE_NUMBER_FORMATS = {
+    'label_of': ('صفحة 3 من 20', 'Page 3 of 20', '{page_label} {page} {of} {pages}'),
+    'label_bar': ('صفحة 3 | 20', 'Page 3 | 20', '{page_label} {page} | {pages}'),
+    'slash': ('3 / 20', '3 / 20', '{page} / {pages}'),
+    'dash': ('- 3 -', '- 3 -', '- {page} -'),
+    'plain': ('3', '3', '{page}'),
 }
 
 PAGE_SIZES = {'A4': (210, 297), 'A3': (297, 420), 'A5': (148, 210), 'Letter': (216, 279), 'Legal': (216, 356)}
@@ -37,7 +54,7 @@ TOKENS = {
     '{issue_no}': ('رقم الإصدار', 'Issue number'), '{issue_date}': ('تاريخ الإصدار', 'Issue date'),
     '{edition}': ('النسخة', 'Edition'), '{page}': ('رقم الصفحة', 'Page number'),
     '{pages}': ('عدد الصفحات', 'Page count'), '{issue_label}': ('عبارة «تاريخ الإصدار»', '«Issue date» label'),
-    '{page_label}': ('عبارة «صفحة»', '«Page» label'),
+    '{page_label}': ('عبارة «صفحة»', '«Page» label'), '{of}': ('عبارة «من»', '«of» label'),
 }
 
 TABLE_PRESETS = {

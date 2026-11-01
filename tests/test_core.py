@@ -1,3 +1,4 @@
+import re
 import os
 
 from manual_app.core import importer, orgchart, templates
@@ -35,8 +36,8 @@ def test_html_contains_content_both_languages(db, manual):
     db.replace_blocks(v['id'], [{'kind': 'paragraph', 'ar': 'رؤيتنا <b>واضحة</b>', 'en': 'Our vision'},
                                 {'kind': 'bullets', 'ar': 'أ\nب', 'en': 'a\nb'}])
     html = build_html(db, manual, 'print')
-    assert 'رؤيتنا <b>واضحة</b>' in html and 'Our vision' in html and '<li>ب</li>' in html
-    assert '@page' in html and 'counter(pages)' in html and 'Paged' in html
+    assert 'رؤيتنا <b>واضحة</b>' in html and 'Our vision' in html and re.search(r'<li[^>]*>ب</li>', html)
+    assert '@page' in html and 'counter(pages, decimal)' in html and 'Paged' in html
     web = build_html(db, manual, 'web')
     assert 'id="q"' in web and 'Paged' not in web and 'Our vision' in web
 

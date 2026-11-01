@@ -7,18 +7,19 @@
   the interactive copy that can be sent to staff or put on the intranet.
 """
 import base64
+import json
 import os
 import re
 import sys
-from html import escape
+from html import escape, unescape
 
 from . import orgchart
 from .db import CONTROL_STATUSES, STATUSES
 from .richtext import clean, lines
-from .templates import FONTS, PAGE_SIZES, layout_with_defaults
+from .templates import FONTS, FRONT_KINDS, PAGE_SIZES, layout_with_defaults
 
 LABELS = {
-    'issue_label': ('تاريخ الإصدار:', 'Issue Date:'), 'page_label': ('صفحة', 'Page'),
+    'issue_label': ('تاريخ الإصدار:', 'Issue Date:'), 'page_label': ('صفحة', 'Page'), 'of': ('من', 'of'),
     'responsible': ('المسؤول عن المتابعة والتحديث', 'Responsible to maintain & update'),
     'history': ('سجل التغييرات', 'Change history'), 'version': ('الإصدار', 'Version'), 'date': ('التاريخ', 'Date'),
     'changes': ('التغييرات', 'Changes'), 'by': ('بواسطة', 'By'),
@@ -42,6 +43,96 @@ DEFAULT_DISCLAIMER = (
     'recipient, you are hereby notified that any dissemination, distribution or copying of this document is strictly '
     'prohibited. Unauthorised disclosure will result in legal consequences. If you have received this document in '
     'error, please notify the sender immediately and destroy all copies.')
+
+
+CHUNK = 520          # characters of one side of a side-by-side piece: the page may break between pieces
+PIECE = '\x01'       # between the pieces of one block
+GLUE = '\x00'        # after the first piece of a section (kept on the page of the section title)
+_SENT = re.compile(r'(?<=[.!?؟؛…:])\s+')
+
+
+def chunk_html(html, target):
+    """Cuts inline HTML into pieces of about ``target`` characters, at line breaks and sentence ends (at word ends
+    for a very long sentence); tags open across a cut are closed and opened again."""
+    if len(re.sub(r'<[^>]+>', '', html)) <= target * 1.3:
+        return [html]
+    parts, cur, size, stack = [], [], 0, []
+
+    def cut():
+        nonlocal cur, size
+        if not size:
+            return
+        parts.append(''.join(cur) + ''.join(f'</{t}>' for t in reversed([x[0] for x in stack])))
+        cur, size = [x[1] for x in stack], 0
+    for tok in re.split(r'(<[^>]+>)', html):
+        if not tok:
+            continue
+        if tok.startswith('<'):
+            m = re.match(r'<(/?)([a-z0-9]+)', tok)
+            name = m.group(2) if m else ''
+            if name == 'br':
+                if size >= target:
+                    cut()
+                    continue
+                cur.append(tok)
+                continue
+            if m and m.group(1):
+                if stack and stack[-1][0] == name:
+                    stack.pop()
+            elif m:
+                stack.append((name, tok))
+            cur.append(tok)
+            continue
+        for sent in _SENT.split(tok):
+            words = sent.split(' ') if len(sent) > target else [sent]
+            for j, w in enumerate(words):
+                piece = w + (' ' if j < len(words) - 1 else '')
+                if size >= target:
+                    cut()
+                cur.append(piece)
+                size += len(piece)
+            cur.append(' ')
+    if cur:
+        rest = ''.join(cur).strip()
+        if re.sub(r'<[^>]+>', '', rest).strip():
+            parts.append(rest)
+        elif parts:
+            parts[-1] += rest
+    return [re.sub(r'^(\s|<br>)+', '', p) for p in parts] or [html]
+
+
+def even_pieces(a_parts, e_parts):
+    """Both languages in the same number of pieces (the extra ones of the longer side go together at its end)."""
+    n = min(len(a_parts), len(e_parts)) or max(len(a_parts), len(e_parts))
+    if len(a_parts) > n and len(e_parts):
+        a_parts = a_parts[:n - 1] + [' '.join(a_parts[n - 1:])]
+    if len(e_parts) > n and len(a_parts):
+        e_parts = e_parts[:n - 1] + [' '.join(e_parts[n - 1:])]
+    a_parts += [''] * (n - len(a_parts))
+    e_parts += [''] * (n - len(e_parts))
+    return a_parts, e_parts
+
+
+_TABLE = re.compile(r'<table class="t[ "][^>]*>.*?</table>', re.S)
+
+
+def mirror_tables(body):
+    """Right-to-left tables written left to right with their cells in reverse order: Paged.js measures where a
+    right-to-left table runs over the page wrongly and drops the rows that do not fit, instead of moving them on."""
+    import lxml.html
+
+    def flip(m):
+        frag = lxml.html.fragment_fromstring(m.group(0))
+        for tr in frag.iter('tr'):
+            cells = list(tr)
+            for c in cells:
+                tr.remove(c)
+            for c in reversed(cells):
+                c.set('dir', 'rtl')
+                tr.append(c)
+        frag.set('class', frag.get('class', '') + ' mirrored')
+        return lxml.html.tostring(frag, encoding='unicode')
+    return _TABLE.sub(flip, body)
 
 
 def app_root():
@@ -68,6 +159,12 @@ class Renderer:
         self.workflow = workflow
         self._asset_cache = {}
         self.numbers = {}
+        self.pn = self.lay['page_numbers']
+        self.front_ids, self.reset_id = set(), None
+        self._bref = None             # «section:block» of the block being written (lets the layout check name it)
+        self._k = 0
+        self._kmap = {}               # every marked text: where it belongs, so text that never prints is found
+        self._sid = None
 
     # ── small helpers ────────────────────────────────────────────────
     def L(self, key):
@@ -95,6 +192,17 @@ class Renderer:
                f'preserveAspectRatio="{par}" opacity="{float(opacity):.2f}" href="{uri}" xlink:href="{uri}"/></svg>')
         return 'data:image/svg+xml;base64,' + base64.b64encode(svg.encode()).decode()
 
+    def k(self, html):
+        """Marks a piece of text with its length, so the layout check can tell when part of it does not print."""
+        if self.mode != 'print':
+            return ''
+        n = len(re.sub(r'\s+', '', unescape(re.sub(r'<[^>]+>', '', html or ''))))
+        if not n:
+            return ''
+        self._k += 1
+        self._kmap[self._k] = [self._bref or f'{self._sid}:', n]
+        return f' data-k="{self._k}" data-n="{n}"'
+
     def pair(self, ar, en, cls='', tag='div', raw=False):
         """One piece of text in the manual's language mode."""
         a = (ar or '') if raw else clean(ar)
@@ -102,13 +210,26 @@ class Renderer:
         if not a and not e:
             return ''
         if self.lm == 'ar':
-            return f'<{tag} class="one ar {cls}" dir="rtl">{a or e}</{tag}>'
+            return f'<{tag} class="one ar {cls}" dir="rtl"{self.k(a or e) if not raw else ""}>{a or e}</{tag}>'
         if self.lm == 'en':
-            return f'<{tag} class="one en {cls}" dir="ltr">{e or a}</{tag}>'
+            return f'<{tag} class="one en {cls}" dir="ltr"{self.k(e or a) if not raw else ""}>{e or a}</{tag}>'
+        if self.lm == 'bi_side' and self.mode == 'print' and tag == 'div' and \
+                max(len(re.sub(r'<[^>]+>', '', a)), len(re.sub(r'<[^>]+>', '', e))) > CHUNK * 1.3:
+            # a long text side by side goes in pieces: the page can break between them (a page break inside
+            # two columns side by side loses or repeats lines), and the two languages stay level piece by piece
+            k = max(-(-len(re.sub(r'<[^>]+>', '', a)) // CHUNK), -(-len(re.sub(r'<[^>]+>', '', e)) // CHUNK))
+            ap = chunk_html(a, max(200, len(re.sub(r'<[^>]+>', '', a)) // k + 1)) if a else []
+            ep = chunk_html(e, max(200, len(re.sub(r'<[^>]+>', '', e)) // k + 1)) if e else []
+            ap, ep = even_pieces(ap, ep)
+            ref = f' data-b="{self._bref}"' if self._bref else ''
+            return PIECE.join(f'<div class="pair {cls}"{ref}><div class="ar" dir="rtl"{self.k(x) if not raw else ""}>{x}</div>'
+                              f'<div class="en" dir="ltr"{self.k(y) if not raw else ""}>{y}</div></div>'
+                              for x, y in zip(ap, ep))
+        ka, ke = (self.k(a), self.k(e)) if not raw else ('', '')
         if self.lm == 'bi_stack':
-            return (f'<{tag} class="stack {cls}">' + (f'<div class="ar" dir="rtl">{a}</div>' if a else '')
-                    + (f'<div class="en" dir="ltr">{e}</div>' if e else '') + f'</{tag}>')
-        return f'<{tag} class="pair {cls}"><div class="ar" dir="rtl">{a}</div><div class="en" dir="ltr">{e}</div></{tag}>'
+            return (f'<{tag} class="stack {cls}">' + (f'<div class="ar" dir="rtl"{ka}>{a}</div>' if a else '')
+                    + (f'<div class="en" dir="ltr"{ke}>{e}</div>' if e else '') + f'</{tag}>')
+        return f'<{tag} class="pair {cls}"><div class="ar" dir="rtl"{ka}>{a}</div><div class="en" dir="ltr"{ke}>{e}</div></{tag}>'
 
     def title_text(self, s, sep=' / '):
         ar, en = s.get('title_ar') or '', s.get('title_en') or ''
@@ -126,9 +247,10 @@ class Renderer:
             '{org}': self.title_text({'title_ar': m.get('org_ar'), 'title_en': m.get('org_en')}),
             '{issue_no}': m.get('issue_no') or '', '{issue_date}': m.get('issue_date') or '',
             '{edition}': self.title_text({'title_ar': m.get('edition_ar'), 'title_en': m.get('edition_en')}),
-            '{issue_label}': self.L('issue_label'), '{page_label}': self.L('page_label'),
+            '{issue_label}': self.L('issue_label'), '{page_label}': self.L('page_label'), '{of}': self.L('of'),
         }
-        fn = {'{page}': 'counter(page)', '{pages}': 'counter(pages)', '{chapter}': 'string(chapter)',
+        dg = self.digits()
+        fn = {'{page}': f'counter(page, {dg})', '{pages}': f'counter(pages, {dg})', '{chapter}': 'string(chapter)',
               '{section}': 'string(section)'}
         parts = re.split(r'(\{[a-z_]+\})', text or '')
         if not css:
@@ -143,6 +265,36 @@ class Renderer:
                 v = lit.get(p, p)
                 out.append('"' + v.replace('\\', '\\\\').replace('"', '\\"') + '"')
         return ' '.join(out) or 'none'
+
+    def digits(self):
+        return 'arabic-indic' if self.pn.get('digits') == 'arabic' else 'decimal'
+
+    def front_box(self, text):
+        """A header/footer box on a front-matter page when those pages are numbered apart: the page number alone in
+        small roman figures, or nothing."""
+        if '{page}' not in (text or '') and '{pages}' not in (text or ''):
+            return self.tokens(text)
+        if self.pn.get('front') == 'roman':
+            return 'counter(page, lower-roman)'
+        return 'none'
+
+    def plan_numbering(self, flat):
+        """Which sections are front matter, and where the page count starts again."""
+        front = self.pn.get('front', 'same')
+        start = int(self.pn.get('start') or 1)
+        lead = []
+        for s, _ in flat:
+            if s['kind'] not in FRONT_KINDS:
+                break
+            lead.append(s)
+        body = next((s for s, _ in flat if s not in lead), None)
+        if front in ('roman', 'hidden'):
+            self.front_ids = {s['id'] for s in lead if s['kind'] != 'cover'}
+            self.reset_id = body['id'] if body else None
+        elif not self.pn.get('count_cover', True) or start != 1:
+            after_cover = next((s for s, _ in flat if s['kind'] != 'cover'), None)
+            self.reset_id = after_cover['id'] if after_cover else None
+        self.skip_cover = not self.pn.get('count_cover', True) or front in ('roman', 'hidden')
 
     # ── document ─────────────────────────────────────────────────────
     def font_faces(self):
@@ -165,6 +317,13 @@ class Renderer:
                         url = 'file:///' + path.replace('\\', '/').lstrip('/')
                     css.append(f'@font-face{{font-family:"{fam}";font-weight:{weight};src:url("{url}") format("woff2");'
                                f'unicode-range:{rng}}}')
+        if not self.embed or self.needs_symbols:          # check marks, boxes, arrows, stars…: the same on every computer
+            for name in ('symbols-2', 'symbols-1', 'symbols-math'):
+                path = os.path.join(folder, f'{name}.woff2')
+                if os.path.isfile(path):
+                    url = _b64(open(path, 'rb').read(), 'font/woff2') if self.embed else \
+                        'file:///' + path.replace('\\', '/').lstrip('/')
+                    css.append(f'@font-face{{font-family:"MB {name}";src:url("{url}") format("woff2")}}')
         return '\n'.join(css)
 
     def wave_svg(self, height_mm, flip=False, full=False):
@@ -221,6 +380,17 @@ class Renderer:
             box(f'bottom-{start}', ft.get('start', ''), ft_extra), box('bottom-center', ft.get('center', ''), ft_extra),
             box(f'bottom-{end}', ft.get('end', ''), ft_extra + f'text-align:{end};'),
         ])
+        front_boxes = ''
+        if self.front_ids:
+            def fbox(pos, txt, extra=''):
+                content = self.front_box(txt)
+                return f'@{pos}{{content:{content};{extra}}}'
+            front_boxes = '@page front{' + ''.join([
+                fbox(f'top-{start}', hd.get('start', ''), hd_extra), fbox('top-center', hd.get('center', ''), hd_extra),
+                fbox(f'top-{end}', hd.get('end', ''), hd_extra + f'text-align:{end};'),
+                fbox(f'bottom-{start}', ft.get('start', ''), ft_extra), fbox('bottom-center', ft.get('center', ''), ft_extra),
+                fbox(f'bottom-{end}', ft.get('end', ''), ft_extra + f'text-align:{end};')]) + '} .front{page:front}'
+        reset = f'.pgreset{{counter-reset:page {int(self.pn.get("start") or 1)}}}' if self.reset_id else ''
         cover = lay.get('cover') or {}
         cover_layers = []
         if cover.get('bg_id'):
@@ -242,16 +412,19 @@ class Renderer:
 @page cover{{margin:0;background:none;{cover_bg}@top-left{{content:none}}@top-center{{content:none}}@top-right{{content:none}}
   @bottom-left{{content:none}}@bottom-center{{content:none}}@bottom-right{{content:none}}}}
 {''.join(named)}
+{front_boxes}
+{reset}
 :root{{--p:{c['primary']};--s:{c['secondary']};--a:{c['accent']};--t:{c['text']};--h:{c['heading']};
   --th:{c['table_head']};--tht:{c['table_head_text']};--bb:{c['box_border']};--co:{c['callout']}}}
-html{{font-family:"{f['ar']}","{f['en']}",Tajawal,Arial,sans-serif;font-size:{f['size']}pt;line-height:{f['line']};color:var(--t)}}
-body{{margin:0}} body.rtl .sec,body.rtl .chapter-page,body.rtl .toc{{direction:rtl}} body.rtl table.t{{direction:rtl}}
-.en,.en *{{font-family:"{f['en']}","{f['ar']}",Arial,sans-serif}}
+html{{font-family:"{f['ar']}","{f['en']}",Tajawal,"MB symbols-2","MB symbols-1","MB symbols-math",Arial,sans-serif;font-size:{f['size']}pt;line-height:{f['line']};color:var(--t)}}
+body{{margin:0}} body.rtl .sec,body.rtl .chapter-page,body.rtl .toc{{direction:rtl}} body.rtl table.t{{direction:rtl}} body.rtl table.t.mirrored{{direction:ltr}}
+.en,.en *{{font-family:"{f['en']}","{f['ar']}","MB symbols-2","MB symbols-1","MB symbols-math",Arial,sans-serif}}
 .ar{{text-align:justify;direction:rtl}} .en{{text-align:justify;direction:ltr}}
 .pair{{display:grid;grid-template-columns:1fr 1fr;column-gap:7mm;align-items:start}}
-.pair{{direction:ltr}} .pair>.ar{{grid-column:2;grid-row:1}} .pair>.en{{grid-column:1;grid-row:1}}
+.pair{{direction:ltr;break-inside:avoid}} .keep{{break-inside:avoid}} .pair>.ar{{grid-column:2;grid-row:1}} .pair>.en{{grid-column:1;grid-row:1}}
 .stack>.en{{margin-top:1.5mm;color:#334}}
-p,.blk{{margin:0 0 2.2mm}}
+p,.blk{{margin:0 0 2.2mm}} p,li,.blk{{orphans:2;widows:2}}
+.ar,.en,td,th{{overflow-wrap:break-word}} table.t td,table.t th,table.t td *,table.t th *{{overflow-wrap:anywhere}}
 .sec{{break-inside:auto}} .newpage{{break-before:page}}
 .cover{{page:cover;break-after:page;height:{ph}mm;position:relative;overflow:hidden;color:#fff}}
 .chapter-page{{break-before:page;break-after:page;display:flex;flex-direction:column;justify-content:center;min-height:{ph - mg['top'] - mg['bottom'] - 5}mm}}
@@ -264,17 +437,19 @@ h1.chap{{string-set:chapter content(text)}}
 .tbar{{background:{'#eef3fb' if lay.get('boxes') else 'transparent'};border-bottom:{'0.35mm solid var(--bb)' if lay.get('boxes') else '0.6mm solid var(--a)'};
   padding:1.6mm 4mm;margin:0 0 3mm;font-weight:700;color:var(--h);font-size:1.12em;break-after:avoid}}
 .tbar .en{{text-align:left}} .tbar .ar{{text-align:right}}
-.lvl0>.tbar{{font-size:1.25em}} .lvl2>.tbar{{font-size:1.02em}}
+.lvl0>.tbar,.lvl0>.frame>.tbar,.lvl0>.frame>.keep>.tbar,.ptitle.lvl0t{{font-size:1.25em}} .lvl2>.frame>.tbar{{font-size:1.02em}}
+.ptitle{{background:var(--p) !important;color:#fff !important;margin:0 !important}}
 .num{{color:var(--a);margin-inline-end:2mm}}
 .h-sub{{font-weight:700;color:var(--s);margin:3mm 0 1.5mm;break-after:avoid}}
 .h-sub .ar,.h-sub .en{{text-decoration:underline;text-decoration-color:var(--a);text-underline-offset:1mm}}
 ul,ol{{margin:0 0 2mm;padding-inline-start:6mm}} li{{margin:0 0 .8mm}}
-.callout{{background:var(--co);border-inline-start:1.2mm solid var(--a);padding:2.5mm 4mm;margin:0 0 3mm;break-inside:avoid}}
+.callout{{background:var(--co);border-inline-start:1.2mm solid var(--a);padding:2.5mm 4mm;margin:0 0 3mm}}
 .quote{{border-inline-start:1mm solid var(--s);padding:1mm 4mm;color:#45526a;font-style:italic}}
 table.t{{width:100%;border-collapse:collapse;margin:0 0 4mm;font-size:.92em}}
 table.t th{{background:var(--th);color:var(--tht);font-weight:700;padding:1.6mm 2mm;border:0.3mm solid var(--bb);text-align:center}}
 table.t td{{padding:1.4mm 2mm;border:0.3mm solid var(--bb);vertical-align:top}}
 table.t tr:nth-child(even) td{{background:#f6f9fd}} table.t thead{{display:table-header-group}} table.t tr{{break-inside:avoid}}
+table.t.split tr{{break-inside:auto}} table.t.compact td,table.t.compact th{{padding:.8mm 1.2mm}}
 table.t td.n{{text-align:center;width:7mm;color:#55607a}} table.t td .en{{direction:ltr;text-align:left;color:#334;font-size:.95em}}
 table.t .first{{font-weight:700}}
 .figure{{text-align:center;margin:0 0 4mm;break-inside:avoid}} .figure img{{max-width:100%;max-height:{ph - mg['top'] - mg['bottom'] - 25}mm}}
@@ -287,7 +462,7 @@ table.t .first{{font-weight:700}}
 .toc .row .lbl{{flex:1}} .toc .row.d0{{font-weight:700;color:var(--h);margin-top:2.2mm}} .toc .row.d1{{padding-inline-start:6mm}}
 .toc .row.d2{{padding-inline-start:12mm;font-size:.95em}}
 .toc .dots{{flex:1;border-bottom:0.3mm dotted #98a6bd;transform:translateY(-1mm)}}
-.toc .pg::after{{content:target-counter(attr(data-ref url), page)}}
+.toc .pg::after{{content:target-counter(attr(data-ref url), page, {self.digits()})}}
 .bg{{position:relative}} .bg>.bgimg{{position:absolute;inset:0;background-size:cover;background-position:center;z-index:0}}
 .bg>.inner{{position:relative;z-index:1}}
 .status{{display:inline-block;font-size:.8em;padding:.3mm 2mm;border-radius:2mm;background:#fff4e0;color:#8a5a00;margin-inline-start:2mm}}
@@ -334,16 +509,31 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
             self.numbers[s['id']] = '.'.join(str(n) for n in counters)
 
     def render(self):
+        html = self._render()
+        return html.replace(GLUE, '').replace(PIECE, '')
+
+    def _render(self):
         flat = self.db.flat(self.m['id'])
         if self.lay.get('numbering'):
             self.number_sections(flat)
         self.flat = flat
+        self.skip_cover = False
+        if self.mode == 'print':
+            self.plan_numbering(flat)
+        self.needs_symbols = False
         parts = []
-        for s, depth in flat:
-            if self.only is not None and s['id'] not in self.only:
-                continue
+        self._pending = ''
+        shown = [(s, d) for s, d in flat if self.only is None or s['id'] in self.only]
+        for i, (s, depth) in enumerate(shown):
+            self._next_child = i + 1 < len(shown) and shown[i + 1][1] > depth and not shown[i + 1][0]['new_page'] \
+                and shown[i + 1][0]['kind'] not in ('chapter', 'toc', 'cover')
             parts.append(self.section(s, depth))
+        if self._pending:
+            parts.append(self._pending)
         body = '\n'.join(p for p in parts if p)
+        if self.mode == 'print' and self.lm != 'en':
+            body = mirror_tables(body)
+        self.needs_symbols = bool(re.search('[\u2190-\u2bff\U0001F000-\U0001FBFF]', body))
         if self.mode == 'web':
             return self.web_page(body)
         rtl = self.lm != 'en'
@@ -354,7 +544,14 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         # the reading direction is set on the content itself (body.rtl and every Arabic piece)
         return (f'<!DOCTYPE html><html lang="{"ar" if rtl else "en"}" dir="ltr"><head><meta charset="utf-8">'
                 f'<title>{title}</title><style>{self.css()}</style></head><body class="{"rtl" if rtl else "ltr"}">{body}'
-                '<script>window.PagedConfig={auto:true,after:function(f){window.__pages=document.querySelectorAll(".pagedjs_page").length||1;}};</script>'
+                f'<script>window.__kmap={json.dumps(self._kmap, separators=(",", ":"))};</script>'
+                '<script>window.PagedConfig={auto:true,after:function(f){'
+                'var ps=document.querySelectorAll(".pagedjs_page"),skip=0;'
+                # «page N of M»: M counts the numbered pages only (no cover or front matter when numbered apart)
+                f'ps.forEach(function(p){{if({"true" if self.front_ids else "false"}&&p.classList.contains("pagedjs_front_page"))skip++;'
+                f'else if({"true" if self.skip_cover else "false"}&&p.classList.contains("pagedjs_cover_page"))skip++;}});'
+                'if(skip){document.querySelectorAll(".pagedjs_pages,:root").forEach(function(e){e.style.setProperty("--pagedjs-page-count",Math.max(1,ps.length-skip));});}'
+                'window.__pages=ps.length||1;}};</script>'
                 f'<script>{script}</script></body></html>')
 
     def web_page(self, body):
@@ -392,6 +589,7 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
                 f'<main><div class="sheet">{body}</div></main></div><script>{js}</script></body></html>')
 
     def section(self, s, depth):
+        self._sid = s['id']
         kind = s['kind']
         st = s.get('style') or {}
         fn = getattr(self, 'k_' + kind, self.k_text)
@@ -399,7 +597,7 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         if inner is None:
             return ''
         if kind in ('cover', 'chapter'):
-            return f'<div id="s{s["id"]}">{inner}</div>' if kind == 'cover' else inner
+            return f'<div id="s{s["id"]}" data-sid="{s["id"]}">{inner}</div>' if kind == 'cover' else inner
         num = self.numbers.get(s['id'])
         numh = f'<span class="num">{num}</span>' if num else ''
         status = ''
@@ -407,19 +605,40 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
             status = f'<span class="status">{escape(STATUSES.get(s["status"], ("", ""))[0 if self.lm != "en" else 1])}</span>'
         ar, en = escape(s.get('title_ar') or ''), escape(s.get('title_en') or '')
         tbar = '<div class="tbar stitle">' + self.pair(numh + ar + status, numh + en, raw=True) + '</div>'
+        if self.mode == 'print' and kind in ('text', 'policy') and not re.sub(r'<[^>]+>|\s', '', inner) \
+                and getattr(self, '_next_child', False) and not st.get('bg_id'):
+            # a title whose content is its sub-sections goes on the page of the first of them
+            self._pending += (f'<div class="tbar stitle ptitle lvl{min(depth, 2)}t" id="s{s["id"]}" data-sid="{s["id"]}">'
+                              + self.pair(numh + ar + status, numh + en, raw=True) + '</div>')
+            return ''
+        pending, self._pending = getattr(self, '_pending', ''), ''
         classes = ['sec', f'lvl{min(depth, 2)}', 'k-' + kind]
         if s['new_page'] or (kind == 'toc'):
             classes.append('newpage')
-        if st.get('bg_id') and st.get('bg_mode') == 'page':
+        if s['id'] in self.front_ids:
+            classes.append('front')
+        elif st.get('bg_id') and st.get('bg_mode') == 'page':
             classes.append(f'pg{s["id"]}')
+        if s['id'] == self.reset_id:
+            classes.append('pgreset')
         if self.workflow and self.lay.get('draft_mark') and s['status'] != 'approved':
             classes.append('draft-mark')
         bg = ''
         if st.get('bg_id') and st.get('bg_mode') != 'page':
             classes.append('bg')
             bg = f'<div class="bgimg" style="background-image:url(\'{self.faded_uri(st["bg_id"], st.get("bg_opacity", 0.15), st.get("bg_fit", "cover"))}\')"></div>'
-        return (f'<section class="{" ".join(classes)}" id="s{s["id"]}"><div class="frame">{bg}{tbar}'
-                f'<div class="inner">{inner}</div></div></section>')
+        head = f'{pending}{tbar}<div class="inner">'
+        if pending:
+            head = f'<div class="keep">{pending}{tbar}</div><div class="inner">'
+        if GLUE in inner:                  # the section title never stays alone at the bottom of a page
+            first, rest = inner.split(GLUE, 1)
+            if first and inner.startswith(first) and len(re.sub(r'<[^>]+>', '', first)) < 1600:
+                head = f'<div class="keep">{pending}{tbar}<div class="inner">{first}</div></div><div class="inner">'
+                inner = rest
+            else:
+                inner = inner.replace(GLUE, '')
+        return (f'<section class="{" ".join(classes)}" id="s{s["id"]}" data-sid="{s["id"]}"><div class="frame">{bg}{head}'
+                f'{inner}</div></div></section>')
 
     # kinds -----------------------------------------------------------
     def k_cover(self, s, depth):
@@ -460,15 +679,21 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         title = self.pair(((num + ' ') if num else '') + escape(s.get('title_ar') or ''),
                           ((num + ' ') if num else '') + escape(s.get('title_en') or ''), raw=True)
         cls = f'chapter-page pg{s["id"]}' if st.get('bg_id') and st.get('bg_mode') == 'page' else 'chapter-page'
+        if s['id'] == self.reset_id:
+            cls += ' pgreset'
         bg = ''
         if st.get('bg_id') and st.get('bg_mode') != 'page':
             cls += ' bg'
             bg = f'<div class="bgimg" style="background-image:url(\'{self.faded_uri(st["bg_id"], st.get("bg_opacity", 0.2), st.get("bg_fit", "cover"))}\')"></div>'
         body = self.blocks_html(s)
         if not s['new_page']:
-            return (f'<section class="sec lvl0 k-chapter" id="s{s["id"]}"><h1 class="chap tbar" style="font-size:1.4em">{title}</h1>'
-                    f'{body}</section>')
-        return (f'<section class="{cls}" id="s{s["id"]}">{bg}<div class="inner"><h1 class="chap ctitle">{title}</h1>{body}</div></section>')
+            head = f'<h1 class="chap tbar" style="font-size:1.4em">{title}</h1>'
+            if GLUE in body:
+                first, body = body.split(GLUE, 1)
+                head = f'<div class="keep">{head}{first}</div>'
+            return (f'<section class="sec lvl0 k-chapter{" pgreset" if s["id"] == self.reset_id else ""}" id="s{s["id"]}" data-sid="{s["id"]}">'
+                    f'{head}{body}</section>')
+        return (f'<section class="{cls}" id="s{s["id"]}" data-sid="{s["id"]}">{bg}<div class="inner"><h1 class="chap ctitle">{title}</h1>{body}</div></section>')
 
     def k_text(self, s, depth):
         return self.blocks_html(s)
@@ -564,7 +789,33 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
 
     # ── blocks ───────────────────────────────────────────────────────
     def blocks_html(self, s):
-        return ''.join(self.block(b) for b in self.db.blocks(s['id']))
+        pieces = []                      # (html, kind of block)
+        for i, b in enumerate(self.db.blocks(s['id'])):
+            self._bref = f'{s["id"]}:{i}'
+            h = self.block(b)
+            if not h:
+                continue
+            split = h.split(PIECE) if b['kind'] in ('paragraph', 'bullets', 'numbered', 'heading') else [h.replace(PIECE, '')]
+            for j, p in enumerate(split):
+                if 'data-b=' not in p[:p.find('>') + 1]:     # every piece names its block (used by the layout check)
+                    p = re.sub(r'^<([a-z0-9]+)', lambda m: f'<{m.group(1)} data-b="{self._bref}"', p, count=1)
+                pieces.append((p, b['kind'] if j == 0 else 'paragraph'))
+        self._bref = None
+        if self.mode != 'print':
+            return ''.join(p for p, _ in pieces)
+        small = ('paragraph', 'bullets', 'numbered', 'quote', 'links')
+        out, i = [], 0
+        while i < len(pieces):             # a sub-heading stays on the page of what follows it
+            p, k = pieces[i]
+            if k == 'heading' and i + 1 < len(pieces) and pieces[i + 1][1] in small:
+                out.append((f'<div class="keep">{p}{pieces[i + 1][0]}</div>', 'keep'))
+                i += 2
+                continue
+            out.append((p, k))
+            i += 1
+        if out and out[0][1] in small + ('heading', 'keep', 'callout'):
+            return out[0][0] + GLUE + ''.join(p for p, _ in out[1:])
+        return ''.join(p for p, _ in out)
 
     def block(self, b):
         k, d = b['kind'], b.get('data') or {}
@@ -578,8 +829,10 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
             la, le = lines(ar), lines(en)
             if not la and not le:
                 return ''
-            ha = f'<{tag}>' + ''.join(f'<li>{clean(x)}</li>' for x in la) + f'</{tag}>' if la else ''
-            he = f'<{tag}>' + ''.join(f'<li>{clean(x)}</li>' for x in le) + f'</{tag}>' if le else ''
+            if self.lm == 'bi_side' and self.mode == 'print':
+                return PIECE.join(self.pair(ha, he, 'blk', raw=True) for ha, he in self.list_pieces(tag, la, le))
+            ha = f'<{tag}>' + ''.join(f'<li{self.k(clean(x))}>{clean(x)}</li>' for x in la) + f'</{tag}>' if la else ''
+            he = f'<{tag}>' + ''.join(f'<li{self.k(clean(x))}>{clean(x)}</li>' for x in le) + f'</{tag}>' if le else ''
             return self.pair(ha, he, 'blk', raw=True)
         if k == 'callout':
             return f'<div class="callout">{self.pair(ar, en)}</div>' if (ar or en) else ''
@@ -612,6 +865,23 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
             return f'<ul class="links">{"".join(lis)}</ul>'
         return self.pair(ar, en, 'blk')
 
+    def list_pieces(self, tag, la, le):
+        """A side-by-side list in groups of items, item i of one language level with item i of the other."""
+        n = max(len(la), len(le))
+        groups, start, size = [], 0, 0
+        for i in range(n):
+            size += max(len(la[i]) if i < len(la) else 0, len(le[i]) if i < len(le) else 0) + 20
+            if size >= CHUNK or i == n - 1:
+                groups.append((start, i + 1))
+                start, size = i + 1, 0
+        out = []
+        for a, b in groups:
+            st = f' start="{a + 1}"' if tag == 'ol' and a else ''
+            ha = (f'<{tag}{st}>' + ''.join(f'<li{self.k(clean(x))}>{clean(x)}</li>' for x in la[a:b]) + f'</{tag}>') if la[a:b] else ''
+            he = (f'<{tag}{st}>' + ''.join(f'<li{self.k(clean(x))}>{clean(x)}</li>' for x in le[a:b]) + f'</{tag}>') if le[a:b] else ''
+            out.append((ha, he))
+        return out
+
     def cell(self, v):
         if isinstance(v, str):
             return clean(v)
@@ -635,13 +905,17 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         for i, r in enumerate(rows, 1):
             if not any(((x or {}).get('ar') or (x or {}).get('en')) if isinstance(x, dict) else x for x in r):
                 continue
-            tds = ''.join(f'<td class="{"first" if j == 0 and d.get("first_col_bold") else ""}">{self.cell(x)}</td>'
-                          for j, x in enumerate(r[:len(cols)]))
+            tds = ''.join(f'<td class="{"first" if j == 0 and d.get("first_col_bold") else ""}"{self.k(c)}>{c}</td>'
+                          for j, c in ((j, self.cell(x)) for j, x in enumerate(r[:len(cols)])))
             trs.append(f'<tr>{"<td class=n>" + str(i) + "</td>" if numbered else ""}{tds}</tr>')
         cap = ''
         if d.get('caption_ar') or d.get('caption_en'):
             cap = f'<div class="h-sub">{self.pair(d.get("caption_ar"), d.get("caption_en"))}</div>'
-        return f'{cap}<table class="t"><thead><tr>{th}</tr></thead><tbody>{"".join(trs)}</tbody></table>'
+        cls = 't' + (' split' if d.get('split_rows') else '') + (' compact' if d.get('compact') else '')
+        scale = int(d.get('scale') or 100)
+        attrs = (f' style="font-size:{0.92 * scale / 100:.3f}em"' if scale != 100 else '') + \
+            (f' data-b="{self._bref}"' if self._bref else '')
+        return f'{cap}<table class="{cls}"{attrs}><thead><tr>{th}</tr></thead><tbody>{"".join(trs)}</tbody></table>'
 
     def policy_footer(self, s):
         meta = s.get('meta') or {}

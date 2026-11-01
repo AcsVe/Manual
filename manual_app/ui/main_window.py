@@ -16,6 +16,7 @@ from .compliance import ComplianceTab
 from .design import DesignTab
 from .editor import EditorTab
 from .export import ExportTab
+from .doctor import DoctorTab
 from .library import LibraryTab
 from .manuals import ManualsTab
 from .org import OrgTab
@@ -433,6 +434,7 @@ class MainWindow(QMainWindow):
         self.design = DesignTab(ctx)
         self.library = LibraryTab(ctx)
         self.export = ExportTab(ctx)
+        self.doctor = DoctorTab(ctx)
         self.users = UsersTab(ctx)
         self.settings = SettingsTab(ctx)
         self._areas = {}
@@ -442,6 +444,7 @@ class MainWindow(QMainWindow):
                                         (self.compliance, 'shield', 'سجل الالتزام', 'Compliance register', False),
                                         (self.design, 'palette', 'التصميم', 'Design', True),
                                         (self.library, 'image', 'الصور', 'Images', False),
+                                        (self.doctor, 'shield', 'المدقق', 'Checker', False),
                                         (self.export, 'export', 'التصدير', 'Export', True),
                                         (self.users, 'users', 'المستخدمون وسير العمل', 'Users & workflow', False),
                                         (self.settings, 'calibrate', 'الإعدادات', 'Settings', True)):
@@ -466,6 +469,12 @@ class MainWindow(QMainWindow):
     def show_page(self, page):
         self.tabs.setCurrentWidget(self._areas[page])
 
+    def open_doctor(self, run=False):
+        self.doctor.load_manual(self.ctx.manual_id)
+        self.show_page(self.doctor)
+        if run:
+            self.doctor.run()
+
     def open_editor(self):
         self.manual_changed()
         self.show_page(self.editor)
@@ -478,6 +487,7 @@ class MainWindow(QMainWindow):
         self.compliance.load_manual(mid)
         self.design.load_manual(mid)
         self.export.load_manual(mid)
+        self.doctor.load_manual(mid)
         self.library.reload()
         self.users.reload()
         self.update_title()
