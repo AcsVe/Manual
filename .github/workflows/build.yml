@@ -1,0 +1,68 @@
+name: Build ManualBuilder (exe + installer)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write          # publish to the "latest" release
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Install
+        run: pip install -r requirements-dev.txt
+      - name: Tests
+        timeout-minutes: 10
+        env: { QT_QPA_PLATFORM: offscreen, QT_QPA_FONTDIR: 'C:\Windows\Fonts', PYTHONFAULTHANDLER: '1', QTWEBENGINE_CHROMIUM_FLAGS: '--disable-gpu --no-sandbox' }
+        shell: bash
+        run: python -m pytest -v -p no:cacheprovider tests 2>&1 | tee pytest.log; exit ${PIPESTATUS[0]}
+      - name: Test report (one annotation, readable without the log)
+        if: failure()
+        shell: bash
+        run: |
+          python - <<'PY'
+          text = open('pytest.log', encoding='utf-8', errors='replace').read()
+          i = text.find('Timeout +++')
+          sec = text[i:i + 60000] if i >= 0 else text[-20000:]
+          lines = sec.splitlines()
+          keep = [l for l in lines if (l.startswith(('E ', 'FAILED', 'ERROR')) and l.strip() != 'E')
+                  or (l.startswith('tests') and '.py:' in l and 'PASSED' not in l and '::' not in l)]
+          part = '\n'.join(keep[:60])[:3500]
+          print('::error::' + part.replace('%', '%25').replace('\r', '').replace('\n', '%0A'))
+          PY
+      - name: Version
+        id: v
+        shell: bash
+        run: echo "version=$(python -c 'import manual_app; print(manual_app.__version__)')" >> "$GITHUB_OUTPUT"
+      - name: PyInstaller
+        run: pyinstaller --noconfirm ManualBuilder.spec
+      - name: Smoke test of the built program
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:QTWEBENGINE_CHROMIUM_FLAGS = "--disable-gpu --no-sandbox"
+          $p = Start-Process -FilePath dist\ManualBuilder\ManualBuilder.exe -ArgumentList "--selftest", "selftest.txt" -Wait -PassThru
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { exit 1 }
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.v.outputs.version }}" installer\ManualBuilder.iss
+      - uses: actions/upload-artifact@v4
+        with: { name: ManualBuilderSetup, path: dist/ManualBuilderSetup.exe }
+      - name: Publish to the fixed download link
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          gh release view latest >/dev/null 2>&1 || gh release create latest --title "ManualBuilder — آخر إصدار" --notes "يتحدّث تلقائياً مع كل بناء. حمِّل ManualBuilderSetup.exe وشغّله."
+          gh release upload latest dist/ManualBuilderSetup.exe --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.db
+*.db-wal
+*.db-shm
+*.pem
+*license_key_generator*.py
+license.json
+selftest.txt
+.pytest_cache/
