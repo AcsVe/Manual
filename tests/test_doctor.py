@@ -94,3 +94,28 @@ def test_long_side_by_side_text_goes_in_pieces(db, manual):
     html = build_html(db, manual, 'print', only=[v['id']])
     assert html.count('class="pair blk"') >= 4
     assert 'data-k=' in html and 'data-n=' in html
+
+
+def test_dates_follow_one_format(db, manual):
+    v = _vision(db, manual)
+    db.save_manual({'issue_date': '12/11/2024'}, manual)
+    db.replace_blocks(v['id'], [
+        {'kind': 'paragraph', 'ar': 'صدر في 12/11/2024 ونفذ في ٢٠٢٤/١١/١٥، الإصدار v1.2.2024', 'en': 'Issued 31.12.2025, see https://x.org/2024/11/12/a'},
+        {'kind': 'table', 'ar': '', 'en': '', 'data': {'columns': [{'ar': 'التاريخ', 'en': 'Date'}],
+                                                         'rows': [[{'ar': '13/02/2024', 'en': '13/02/2024'}]]}}])
+    found = [x for x in doctor.check(db, manual) if x['rule'] == 'dates']
+    assert {tuple(x['path']) for x in found} >= {('ar',), ('en',), ('manual', 'issue_date'), ('data', 'rows', 0, 0, 'ar')}
+    _done, _skipped, undo = doctor.apply(db, manual, found)
+    bl = db.blocks(v['id'])
+    assert bl[0]['ar'] == 'صدر في 2024-11-12 ونفذ في ٢٠٢٤-١١-١٥، الإصدار v1.2.2024'
+    assert bl[0]['en'] == 'Issued 2025-12-31, see https://x.org/2024/11/12/a'
+    assert bl[1]['data']['rows'][0][0]['ar'] == '2024-02-13'
+    assert db.manual(manual)['issue_date'] == '2024-11-12'
+    assert not [x for x in doctor.check(db, manual) if x['rule'] == 'dates']
+    # day/month/year chosen instead, and the order of an ambiguous date reversed
+    found = [x for x in doctor.check(db, manual, {'text_dates': 'dmy'}) if x['rule'] == 'dates']
+    doctor.apply(db, manual, found)
+    assert db.manual(manual)['issue_date'] == '12/11/2024'
+    assert doctor.unify_dates('05/12/2024', 'iso', 'mdy') == '2024-05-12'
+    doctor.undo(db, undo)
+    assert db.manual(manual)['issue_date'] == '12/11/2024'

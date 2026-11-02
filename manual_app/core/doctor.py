@@ -57,6 +57,7 @@ RULES = {
     'ar_punct': ('direction', 'info', True, True, ('علامات ترقيم لاتينية في نص عربي', 'Latin punctuation in Arabic text')),
     'spacing': ('direction', 'info', True, True, ('مسافات زائدة أو في غير موضعها', 'Extra or misplaced spaces')),
     'brackets': ('direction', 'warning', False, True, ('أقواس غير متوازنة (تنقلب في النص العربي)', 'Unbalanced brackets (they flip in Arabic text)')),
+    'dates': ('format', 'info', True, True, ('تواريخ بغير الصيغة الموحّدة', 'Dates not in the chosen format')),
     'digits_mixed': ('direction', 'info', True, True, ('أرقام لاتينية وعربية مختلطة', 'Western and Arabic-Indic digits mixed')),
     'empty_side': ('direction', 'info', False, True, ('النص بلغة واحدة فقط', 'Text in one language only')),
     'manual_bullets': ('lists', 'warning', True, True, ('تعداد مكتوب يدوياً داخل فقرة', 'List typed by hand inside a paragraph')),
@@ -102,7 +103,11 @@ AUTO_ON_SAVE = ('bidi_marks', 'pua_symbols', 'ar_forms', 'list_markers', 'spacin
 AUTO_ON_IMPORT = AUTO_ON_SAVE + ('manual_bullets', 'empty_block', 'pb_double', 'table_ragged', 'table_empty_col',
                                  'table_empty_rows', 'swapped', 'brackets', 'empty_side', 'table_merged')
 DEFAULT_PREFS = {'disabled': [], 'before_export': True, 'auto_save': False, 'auto_import': True, 'layout': True,
-                 'text_digits': 'keep'}
+                 'text_digits': 'keep', 'text_dates': 'iso', 'date_order': 'dmy'}
+DATE_STYLES = {'keep': ('دون توحيد', 'Leave them'), 'iso': ('2026-12-31', '2026-12-31'),
+               'dmy': ('31/12/2026', '31/12/2026')}
+DATE_ORDERS = {'dmy': ('يوم/شهر/سنة (12/11/2024 = 12 تشرين الثاني)', 'Day/month/year (12/11/2024 = 12 November)'),
+               'mdy': ('شهر/يوم/سنة (12/11/2024 = 11 كانون الأول)', 'Month/day/year (12/11/2024 = 11 December)')}
 
 AR = '؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿'
 _AR = re.compile(f'[{AR}]')
@@ -198,6 +203,54 @@ def to_digits(t, style):
     if style == 'arabic':
         return re.sub('[0-9]', lambda m: AR_DIGITS[int(m.group(0))], t)
     return re.sub(f'[{AR_DIGITS}]', lambda m: str(AR_DIGITS.index(m.group(0))), t)
+
+
+_D = '[0-9\u0660-\u0669]'
+_DATE = re.compile(rf'(?<![\w/.\-])(?:({_D}{{4}})([/.\-])({_D}{{1,2}})\2({_D}{{1,2}})|({_D}{{1,2}})([/.\-])({_D}{{1,2}})\6({_D}{{4}}))(?![\w/\-]|\.{_D})')
+
+
+def _num(s):
+    return int(to_digits(s, 'latin'))
+
+
+def find_dates(t, order='dmy'):
+    """Dates written as numbers in a piece of text: [(match, date, Arabic-Indic digits)]. Year first is read
+    year-month-day; otherwise day-month-year or month-day-year by ``order`` (a day above 12 settles it)."""
+    from datetime import date as _d
+    out = []
+    for m in _DATE.finditer(t):
+        try:
+            if m.group(1):
+                d = _d(_num(m.group(1)), _num(m.group(3)), _num(m.group(4)))
+            else:
+                a, b, y = _num(m.group(5)), _num(m.group(7)), _num(m.group(8))
+                day, month = (a, b) if order == 'dmy' else (b, a)
+                if month > 12 and day <= 12:
+                    day, month = month, day
+                d = _d(y, month, day)
+        except ValueError:
+            continue                     # not a date (a version number, a reference…)
+        if not 1900 <= d.year <= 2200:
+            continue
+        out.append((m, d, bool(re.search('[\u0660-\u0669]', m.group(0)))))
+    return out
+
+
+def format_date(d, style, arabic=False):
+    s = d.isoformat() if style == 'iso' else f'{d.day:02d}/{d.month:02d}/{d.year}'
+    return to_digits(s, 'arabic') if arabic else s
+
+
+def unify_dates(t, style, order='dmy'):
+    if style == 'keep':
+        return t
+    out, last = [], 0
+    for m, d, ar in find_dates(t, order):
+        out.append(t[last:m.start()])
+        out.append(format_date(d, style, ar))
+        last = m.end()
+    out.append(t[last:])
+    return ''.join(out)
 
 
 def html_lines(html):
@@ -296,6 +349,12 @@ def check_text(cx, sid, b, path, side, text, obj):
         out.append(_issue('brackets', sid, b, path, sample=short(text),
                           msg=(('أقواس معكوسة: «)نص(» بدل «(نص)»', 'Reversed brackets: «)text(» instead of «(text)»') if flipped else None),
                           fix=(('تصحيح اتجاه الأقواس', 'Turn the brackets the right way') if flipped else None)))
+    style = cx.prefs.get('text_dates', 'iso')
+    if style != 'keep' and unify_dates(t, style, cx.prefs.get('date_order', 'dmy')) != t:
+        found = [m.group(0) for m, _d, _a in find_dates(t, cx.prefs.get('date_order', 'dmy'))]
+        out.append(_issue('dates', sid, b, path, sample=short(text), params={'style': style, 'order': cx.prefs.get('date_order', 'dmy')},
+                          msg=('تواريخ بغير الصيغة الموحّدة: ' + '، '.join(found[:4]), 'Dates not in the chosen format: ' + ', '.join(found[:4])),
+                          fix=(f'كتابتها بالصيغة {DATE_STYLES[style][0]}', f'Write them as {DATE_STYLES[style][1]}')))
     has_lat_d, has_ar_d = bool(re.search('[0-9]', t)), bool(re.search(f'[{AR_DIGITS}]', t))
     pref = cx.prefs.get('text_digits', 'keep')
     if side == 'ar' and ((pref == 'keep' and has_lat_d and has_ar_d) or (pref == 'arabic' and has_lat_d)
@@ -568,6 +627,14 @@ def check_layout(cx):
         if len(lit) > cap and lit.strip():
             out.append(_issue('header_long', path=[w, p], extra=w + p, sample=lit[:90],
                               msg=(f'نحو {len(lit)} حرفاً والمكان يتسع لنحو {round(cap)}', f'About {len(lit)} characters where about {round(cap)} fit')))
+    style = cx.prefs.get('text_dates', 'iso')
+    for col, (ar, en) in (('issue_date', ('تاريخ الإصدار', 'Issue date')),):
+        v = cx.m.get(col) or ''
+        if style != 'keep' and v and unify_dates(v, style, cx.prefs.get('date_order', 'dmy')) != v:
+            out.append(_issue('dates', path=['manual', col], extra=col, sample=v,
+                              params={'style': style, 'order': cx.prefs.get('date_order', 'dmy')},
+                              msg=(f'{ar} في التصميم بغير الصيغة الموحّدة: {v}', f'{en} in the design not in the chosen format: {v}'),
+                              fix=(f'كتابته بالصيغة {DATE_STYLES[style][0]}', f'Write it as {DATE_STYLES[style][1]}')))
     if hd.get('logo') and not cx.m.get('logo_id'):
         out.append(_issue('logo_flag', fix=('إلغاء خيار الشعار في الترويسة', 'Turn off the logo in the header')))
     if lay.get('page_bg_id') and float(lay.get('page_bg_opacity') or 0) > 0.25:
@@ -802,6 +869,7 @@ class Fixer:
         self.layout = None
         self.new_sections = []
         self.asset_dims = {}
+        self.manual_cols = {}         # columns of the manual itself (the issue date)
         self.done, self.skipped = 0, 0
 
     # state helpers
@@ -889,6 +957,9 @@ class Fixer:
         if self.layout is not None:
             undo['layout'] = self.m['layout']
             self.db.save_manual({'layout': self.layout}, self.mid)
+        if self.manual_cols:
+            undo['manual_cols'] = {k: self.m.get(k) for k in self.manual_cols}
+            self.db.save_manual(dict(self.manual_cols), self.mid)
         for aid, (w, h) in self.asset_dims.items():
             self.db.conn.execute('UPDATE assets SET width = ?, height = ? WHERE id = ?', (w, h, aid))
         if self.asset_dims:
@@ -962,6 +1033,14 @@ class Fixer:
 
     def fix_ar_punct(self, x):
         self.edit_text(x, lambda t: map_text(t, ar_punct))
+
+    def fix_dates(self, x):
+        p = x['params']
+        if x.get('path') and x['path'][0] == 'manual':
+            self.manual_cols[x['path'][1]] = unify_dates(self.manual_cols.get(x['path'][1], self.m.get(x['path'][1]) or ''),
+                                                         p['style'], p['order'])
+            return
+        self.edit_text(x, lambda t: map_text(t, lambda s: unify_dates(s, p['style'], p['order'])))
 
     def fix_digits_mixed(self, x):
         self.edit_text(x, lambda t: map_text(t, lambda p: to_digits(p, x['params']['style'])))
@@ -1187,6 +1266,8 @@ def undo(db, data):
         db.save_section(cols, int(sid))
     if data.get('layout') is not None:
         db.save_manual({'layout': data['layout']}, data['manual'])
+    if data.get('manual_cols'):
+        db.save_manual(dict(data['manual_cols']), data['manual'])
     if data.get('new_sections'):
         db.delete_sections(data['new_sections'])
     db.audit('doctor_undo', manual=data['manual'])

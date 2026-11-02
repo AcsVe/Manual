@@ -44,6 +44,22 @@ class DoctorSettings(SizedDialog):
         drow = QHBoxLayout()
         drow.addWidget(QLabel(L('الأرقام داخل النص العربي:', 'Digits inside Arabic text:')))
         drow.addWidget(self.digits, 1)
+        self.dates = QComboBox()
+        for k, (ar, en) in doctor.DATE_STYLES.items():
+            self.dates.addItem(L(ar, en), k)
+        self.dates.setCurrentIndex(max(0, self.dates.findData(p.get('text_dates', 'iso'))))
+        a11y(self.dates, L('صيغة التواريخ في النص', 'Date format in the text'))
+        self.order = QComboBox()
+        for k, (ar, en) in doctor.DATE_ORDERS.items():
+            self.order.addItem(L(ar, en), k)
+        self.order.setCurrentIndex(max(0, self.order.findData(p.get('date_order', 'dmy'))))
+        a11y(self.order, L('قراءة التاريخ المكتوب بالشرطة المائلة', 'Reading a date written with slashes'))
+        trow = QHBoxLayout()
+        trow.addWidget(QLabel(L('صيغة التواريخ في النص:', 'Date format in the text:')))
+        trow.addWidget(self.dates, 1)
+        orow = QHBoxLayout()
+        orow.addWidget(QLabel(L('التاريخ مثل 12/11/2024 يُقرأ:', 'A date like 12/11/2024 reads:')))
+        orow.addWidget(self.order, 1)
         self.rules = QTreeWidget()
         self.rules.setHeaderLabels([L('القاعدة', 'Rule'), L('الخطورة', 'Severity')])
         a11y(self.rules, L('قواعد الفحص', 'Checking rules'))
@@ -72,6 +88,8 @@ class DoctorSettings(SizedDialog):
         for w in (self.before_export, self.auto_save, self.auto_import, self.layout):
             lay.addWidget(w)
         lay.addLayout(drow)
+        lay.addLayout(trow)
+        lay.addLayout(orow)
         lay.addWidget(muted(L('القواعد المفعّلة:', 'Rules in use:')))
         lay.addWidget(self.rules, 1)
         lay.addWidget(bb)
@@ -92,7 +110,8 @@ class DoctorSettings(SizedDialog):
         p = doctor.load_prefs(self.db)
         p.update(disabled=disabled, enabled=enabled, before_export=self.before_export.isChecked(),
                  auto_save=self.auto_save.isChecked(), auto_import=self.auto_import.isChecked(),
-                 layout=self.layout.isChecked(), text_digits=self.digits.currentData())
+                 layout=self.layout.isChecked(), text_digits=self.digits.currentData(),
+                 text_dates=self.dates.currentData(), date_order=self.order.currentData())
         doctor.save_prefs(self.db, p)
         self.accept()
 
