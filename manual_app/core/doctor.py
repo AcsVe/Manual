@@ -24,7 +24,7 @@ from datetime import date
 from . import backgrounds as BG
 from .db import BLOCK_KINDS, SECTION_KINDS
 from .richtext import plain
-from .templates import FRONT_KINDS, PAGE_SIZES, TOKENS, layout_with_defaults
+from .templates import FRONT_KINDS, PAGE_SIZES, TOKENS, layout_with_defaults, tokens_to_words
 
 CATEGORIES = {
     'page': ('الصفحة والهوامش', 'Page and margins'),
@@ -615,7 +615,7 @@ def check_layout(cx):
     for w, p, t in boxes:
         bad = [tok for tok in _TOKEN.findall(t) if tok not in TOKENS]
         if bad:
-            out.append(_issue('unknown_token', path=[w, p], extra=w + p, sample=t, params={'where': w, 'box': p},
+            out.append(_issue('unknown_token', path=[w, p], extra=w + p, sample=tokens_to_words(t), params={'where': w, 'box': p},
                               msg=('حقل غير معروف: ' + '، '.join(bad), 'Unknown field: ' + ', '.join(bad)),
                               fix=('حذف الحقل غير المعروف', 'Remove the unknown field')))
         lit = _TOKEN.sub('', t)

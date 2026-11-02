@@ -221,6 +221,9 @@ class DataTable(QWidget):
         bar.addWidget(self.sel_label)
         bar.addStretch(1)
         self.action_buttons = []
+        self.menu_actions = [a for a in actions]
+        self.view.setContextMenuPolicy(Qt.CustomContextMenu)          # right click: the same actions as the bar
+        self.view.customContextMenuRequested.connect(self._context_menu)
         for act in actions:
             label, cb, danger = act[:3]
             b = button(label, act[3] if len(act) > 3 else None, 'danger' if danger else 'secondary')
@@ -321,6 +324,26 @@ class DataTable(QWidget):
         for b in self.action_buttons:
             b.setEnabled(bool(ids))
         self.selection_changed.emit(ids)
+
+    def _context_menu(self, pos):
+        from PySide6.QtWidgets import QMenu
+        from .theme import icon
+        idx = self.view.indexAt(pos)
+        if idx.isValid() and not self.view.selectionModel().isRowSelected(idx.row(), QModelIndex()):
+            self.view.selectRow(idx.row())                  # the row under the mouse, as in Windows lists
+        ids = self.selected_ids()
+        m = QMenu(self)
+        if ids and self.menu_actions:
+            for act in self.menu_actions:
+                label, cb, danger = act[:3]
+                ic = icon(act[3], '#b42318' if danger else '#334155') if len(act) > 3 and act[3] else None
+                a = m.addAction(ic, label) if ic else m.addAction(label)
+                a.triggered.connect(lambda _=False, f=cb: f(self.selected_ids()))
+            m.addSeparator()
+        m.addAction(L('تحديد الكل', 'Select all'), self.view.selectAll)
+        m.addAction(L('إلغاء التحديد', 'Clear selection'), self.view.clearSelection)
+        m.addAction(L('تصدير إلى Excel…', 'Export to Excel…'), self.export)
+        m.exec(self.view.viewport().mapToGlobal(pos))
 
     def _double(self, index: QModelIndex):
         rid = index.data(ID_ROLE)

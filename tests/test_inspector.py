@@ -84,3 +84,44 @@ def test_shape_removed_from_one_page_only(win, db, manual):
     assert 'class="pgoNp"' in html and '@page oriNp{' in html
     page_rule = html[html.index('@page oriNp{'):][:300]
     assert 'background:none' in page_rule or 'background:url' in page_rule      # no wave on that page
+
+
+def test_right_click_menus_and_field_names(win, db, manual, monkeypatch):
+    import PySide6.QtWidgets as qw
+    shown = []
+
+    class Menu(qw.QMenu):                     # records the menu instead of waiting for a click
+        def exec(self, *a, **k):
+            shown.append([x.text() for x in self.actions() if x.text()])
+    QMenu = qw.QMenu
+    monkeypatch.setattr(qw, 'QMenu', Menu)
+    v = _vision(db, manual)
+    win.editor.reload_tree(select=v['id'])
+    blk = win.editor.blocks[0]
+    m = QMenu()
+    blk.fill_menu(m)
+    texts = [a.text() for a in m.actions() if a.text()]
+    assert 'إضافة كتلة بعدها' in texts and 'حذف الكتلة' in texts
+    table = win.home.manuals.table
+    table._context_menu(table.view.visualRect(table.proxy.index(0, 0)).center())
+    assert shown and 'فتح في المحرر' in shown[-1] and 'تصدير إلى Excel…' in shown[-1]
+    # header and footer boxes show the names of the fields, and keep the codes when saved
+    from manual_app.ui.inspector import TokenEdit
+    t = TokenEdit('صفحة {page} من {pages}')
+    assert t.edit.text() == 'صفحة [رقم الصفحة] من [عدد الصفحات]' and t.text() == 'صفحة {page} من {pages}'
+    t.edit.setText('[عنوان الدليل] — [غير معروف]')
+    assert t.text() == '{title} — [غير معروف]'
+
+
+def test_no_english_words_in_arabic_texts():
+    import glob
+    import re
+    allowed = {'PDF', 'Word', 'Excel', 'HTML', 'RACI', 'PNG', 'JPG', 'ManualBuilder', 'Windows', 'docx', 'https'}
+    found = []
+    for f in glob.glob('manual_app/ui/*.py') + glob.glob('manual_app/core/*.py'):
+        s = open(f, encoding='utf-8').read()
+        for m in re.finditer(r"L\(\s*'((?:[^'\\]|\\.)*)'\s*,", s):
+            words = set(re.findall(r'[A-Za-z]{3,}', m.group(1))) - allowed
+            if words or '{page' in m.group(1):
+                found.append((f, m.group(1)[:60]))
+    assert not found, found

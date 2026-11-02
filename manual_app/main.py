@@ -179,6 +179,21 @@ def _listen(window):
     return server
 
 
+def _qt_arabic(app):
+    """Qt's own texts in Arabic: cut, copy and paste in text boxes, and the colour, file and message dialogs."""
+    from PySide6.QtCore import QLibraryInfo, QTranslator
+    places = [QLibraryInfo.path(QLibraryInfo.TranslationsPath),
+              os.path.join(getattr(sys, '_MEIPASS', ''), 'PySide6', 'Qt', 'translations'), resource('qt')]
+    app._translators = []
+    for name in ('qtbase_ar', 'qt_ar'):
+        for place in places:
+            t = QTranslator(app)
+            if place and t.load(name, place):
+                app.installTranslator(t)
+                app._translators.append(t)
+                break
+
+
 def main(argv=None):
     argv = argv if argv is not None else sys.argv
     if '--fingerprint' in argv:
@@ -204,6 +219,7 @@ def main(argv=None):
     set_lang(ctx.db.get('lang', 'ar'))
     if ctx.db.get('lang', 'ar') != 'en':
         app.setLayoutDirection(Qt.RightToLeft)
+        _qt_arabic(app)
     from .ui.theme import apply_theme
     apply_theme(app)
     ctx.daily_backup()

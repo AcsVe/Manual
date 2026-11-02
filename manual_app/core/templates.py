@@ -75,6 +75,22 @@ TOKENS = {
     '{page_label}': ('عبارة «صفحة»', '«Page» label'), '{of}': ('عبارة «من»', '«of» label'),
 }
 
+def tokens_to_words(text, arabic=True):
+    """Header and footer texts as the user reads them: every field shown by its name in square brackets
+    («صفحة {page}» → «صفحة [رقم الصفحة]»)."""
+    for tok, (ar, en) in TOKENS.items():
+        text = (text or '').replace(tok, f'[{ar if arabic else en}]')
+    return text or ''
+
+
+def words_to_tokens(text):
+    """The reverse of ``tokens_to_words``, for either language; a bracket that names no field stays as written."""
+    text = text or ''
+    for tok, (ar, en) in TOKENS.items():
+        text = text.replace(f'[{ar}]', tok).replace(f'[{en}]', tok)
+    return text
+
+
 TABLE_PRESETS = {
     'custom': (('جدول', 'Table'), []),
     'authority': (('مصفوفة الصلاحيات والمسؤوليات', 'Authority & responsibility matrix'),

@@ -59,6 +59,15 @@ class RichEdit(QTextEdit):
         super().focusInEvent(e)
         self.focused.emit(self)
 
+    extra_menu = None                 # set by the block: adds its own actions under cut, copy and paste
+
+    def contextMenuEvent(self, e):    # noqa: N802 (Qt name)
+        m = self.createStandardContextMenu()
+        if self.extra_menu:
+            m.addSeparator()
+            self.extra_menu(m)
+        m.exec(e.globalPos())
+
     def insertFromMimeData(self, source):          # pasted text keeps only the formatting the manual uses
         if source.hasHtml():
             self.insertHtml(clean(source.html()))
@@ -320,7 +329,8 @@ class TableColorsDialog(SizedDialog):
         for k, b in self.buttons.items():
             c = self.values.get(k) or '#ffffff'
             light = QColor(c).lightness() > 150
-            b.setText('\u200e' + c.upper())          # the colour code reads left to right
+            b.setText('')                        # the colour itself, its code only on hover
+            b.setToolTip(c.upper())
             b.setStyleSheet(f'background:{c};color:{"#1e293b" if light else "#ffffff"};border:1px solid #c9d4e3;border-radius:6px')
         v = self.values
         cell = f'border:1px solid {v["border"]};padding:3px 10px;color:{v["text"]}'
@@ -638,6 +648,7 @@ class BlockWidget(QFrame):
             for e in (self.ar, self.en):
                 e.textChanged.connect(self.changed.emit)
                 e.focused.connect(self.focused.emit)
+                e.extra_menu = self.fill_menu
             row = QHBoxLayout()
             row.setSpacing(8)
             # Arabic at the reading start, English beside it, as in the printed pages
@@ -737,6 +748,29 @@ class BlockWidget(QFrame):
             self.asset_id = aid
             self._thumb()
             self.changed.emit()
+
+    def fill_menu(self, m):
+        """The block's actions, for a right click on it (also under cut, copy and paste in its text boxes)."""
+        m.addAction(icon('plus', '#334155'), L('إضافة كتلة بعدها', 'Add a block after it'), lambda: self.insert_after.emit(self))
+        m.addAction(icon('up', '#334155'), L('تحريك لأعلى', 'Move up'), lambda: self.move.emit(self, -1))
+        m.addAction(icon('down', '#334155'), L('تحريك لأسفل', 'Move down'), lambda: self.move.emit(self, 1))
+        if self.align.isVisible():
+            sub = m.addMenu(L('المحاذاة', 'Alignment'))
+            for i in range(self.align.count()):
+                a = sub.addAction(self.align.itemText(i), lambda i=i: self.align.setCurrentIndex(i))
+                a.setCheckable(True)
+                a.setChecked(i == self.align.currentIndex())
+        kinds = m.addMenu(L('تحويل إلى', 'Change into'))
+        for i in range(self.kind.count()):
+            if i != self.kind.currentIndex():
+                kinds.addAction(self.kind.itemIcon(i), self.kind.itemText(i), lambda i=i: self.kind.setCurrentIndex(i))
+        m.addSeparator()
+        m.addAction(icon('trash', '#b42318'), L('حذف الكتلة', 'Delete the block'), lambda: self.remove.emit(self))
+
+    def contextMenuEvent(self, e):    # noqa: N802 (Qt name)
+        m = QMenu(self)
+        self.fill_menu(m)
+        m.exec(e.globalPos())
 
     def _drop(self):
         self.asset_id = None
@@ -852,8 +886,8 @@ class SectionForm(QWidget):
         # page direction and background
         self.orientation = QComboBox()
         self.orientation.addItem(L('كإعداد الدليل', 'As the manual'), '')
-        self.orientation.addItem(L('عمودي (Portrait)', 'Portrait'), 'portrait')
-        self.orientation.addItem(L('أفقي (Landscape)', 'Landscape'), 'landscape')
+        self.orientation.addItem(L('عمودي', 'Portrait'), 'portrait')
+        self.orientation.addItem(L('أفقي', 'Landscape'), 'landscape')
         fit(self.orientation, 190)
         self.bg_label = QLabel(L('بلا خلفية', 'No background'))
         self.bg_label.setProperty('muted', True)
@@ -1138,6 +1172,25 @@ class Preview(QWidget):
         super().resizeEvent(e)
         self._zoom()
 
+    def _click_at(self, pos):
+        z = self.view.zoomFactor() or 1
+        x, y = pos.x() / z, pos.y() / z
+        self.view.page().runJavaScript(
+            f"(function(){{var t=document.elementFromPoint({x:.0f},{y:.0f});if(t)t.dispatchEvent(new MouseEvent('click',"
+            f"{{bubbles:true,clientX:{x:.0f},clientY:{y:.0f}}}));}})()")
+
+    def _menu(self, pos):
+        m = QMenu(self)
+        m.addAction(icon('edit', '#334155'), L('تعديل هذا الجزء', 'Change this part'), lambda: self._click_at(pos))
+        m.addAction(icon('reprint', '#334155'), L('تحديث المعاينة', 'Refresh the preview'), self.refresh_btn.click)
+        if self.inspector.isVisible():
+            m.addAction(icon('close', '#334155'), L('إغلاق لوحة التعديل', 'Close the panel'), self.inspector.hide)
+        m.addSeparator()
+        m.addAction(L('تكبير', 'Zoom in'), lambda: self.view.setZoomFactor(min(3.0, self.view.zoomFactor() * 1.15)))
+        m.addAction(L('تصغير', 'Zoom out'), lambda: self.view.setZoomFactor(max(0.25, self.view.zoomFactor() / 1.15)))
+        m.addAction(L('ملاءمة العرض', 'Fit the width'), self._zoom)
+        m.exec(self.view.mapToGlobal(pos))
+
     def _arm(self, tries=0):
         """Paged.js lays the pages out after the load; the click script is added once they exist."""
         if self.view is None:
@@ -1168,6 +1221,9 @@ class Preview(QWidget):
                 return
             self.view = QWebEngineView()
             self.view.setPage(_picking_page(self.view, self.picked.emit))
+            # right click: the program's own menu (the browser one would offer «reload», «view source»…)
+            self.view.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.view.customContextMenuRequested.connect(self._menu)
             settings_for(self.view.page())
             self.view.loadFinished.connect(lambda _ok: self._zoom())
             self.view.loadFinished.connect(lambda _ok: self._arm())

@@ -6,8 +6,8 @@ import copy
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                               QScrollArea, QSpinBox, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
+                               QScrollArea, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
 from ..core.db import BLOCK_KINDS
 from ..core.templates import BLOCK_ALIGN, HEADER_STYLES, layout_with_defaults
@@ -22,6 +22,44 @@ HEADS = {'': ('دون تغيير', 'No change'), 'plain': ('دون الشكل ا
          'shape': ('بالشكل الملوّن', 'With the coloured shape')}
 ORIENTS = {'': ('دون تغيير', 'No change'), 'portrait': ('عمودي', 'Portrait'), 'landscape': ('أفقي', 'Landscape'),
            'section': ('كاتجاه القسم', 'As the section')}
+
+
+class TokenEdit(QWidget):
+    """A header/footer text with a «حقل» button that inserts what changes when printing (page number, issue date…).
+    The fields show by their names in square brackets; ``text()`` gives them back in the stored form."""
+    editingFinished = Signal()
+
+    def __init__(self, text=''):
+        super().__init__()
+        from ..core.templates import TOKENS
+        self.edit = QLineEdit()
+        self.edit.setMinimumWidth(200)
+        self.edit.editingFinished.connect(self.editingFinished.emit)
+        btn = QToolButton()
+        btn.setText(L('حقل', 'Field'))
+        btn.setToolTip(L('إدراج ما يتغير عند الطباعة، مثل رقم الصفحة', 'Insert what changes when printing, such as the page number'))
+        a11y(btn, L('إدراج حقل', 'Insert a field'))
+        m = QMenu(btn)
+        for _tok, (ar, en) in TOKENS.items():
+            name = L(ar, en)
+            m.addAction(name, lambda n=name: (self.edit.insert(f'[{n}]'), self.editingFinished.emit()))
+        btn.setMenu(m)
+        btn.setPopupMode(QToolButton.InstantPopup)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        lay.addWidget(self.edit, 1)
+        lay.addWidget(btn)
+        self.set_text(text)
+
+    def set_text(self, text):
+        from ..core.templates import tokens_to_words
+        from .common import lang
+        self.edit.setText(tokens_to_words(text, lang() != 'en'))
+
+    def text(self):
+        from ..core.templates import words_to_tokens
+        return words_to_tokens(self.edit.text())
 
 
 class ColorButton(QPushButton):
@@ -51,11 +89,13 @@ class ColorButton(QPushButton):
     def _paint(self):
         if self.value:
             light = QColor(self.value).lightness() > 150
-            self.setText('‎' + self.value)
+            self.setText('')                     # the colour itself, its code only on hover
+            self.setToolTip(self.value)
             self.setStyleSheet(f'background:{self.value};color:{"#1e293b" if light else "#ffffff"};'
                                'border:1px solid #c9d4e3;border-radius:6px')
         else:
             self.setText(L('تلقائي', 'Automatic'))
+            self.setToolTip(L('لون التصميم', 'The design colour'))
             self.setStyleSheet('')
 
 
@@ -384,8 +424,8 @@ class Inspector(QFrame):
         out = []
         for k, (ar, en) in (('start', ('النص في البداية', 'Text at the start')), ('center', ('النص في الوسط', 'Text in the centre')),
                             ('end', ('النص في النهاية', 'Text at the end'))):
-            e = QLineEdit(data.get(k) or '')
-            e.setPlaceholderText(L('مثلاً: صفحة {page} من {pages}', 'e.g. Page {page} of {pages}'))
+            e = TokenEdit(data.get(k) or '')
+            e.edit.setPlaceholderText(L('نص، أو حقل من زر «حقل»', 'Text, or a field from the «Field» button'))
             e.editingFinished.connect(lambda e=e, k=k: e.text() != (self.lay()[which].get(k) or '') and
                                       self.set_layout(lambda l: l[which].update({k: e.text()})))
             out.append((L(ar, en), e))

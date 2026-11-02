@@ -15,6 +15,7 @@ from ..core.templates import (ALIGNMENTS, DEFAULT_LAYOUT, FONTS, FRONT_NUMBERING
                               PAGE_NUMBER_FORMATS, PAGE_SIZES, TOKENS,
                               layout_with_defaults)
 from .background import edit_background
+from .inspector import TokenEdit
 from .common import L
 from .library import asset_pixmap, pick_asset
 from .theme import a11y, button, card, field, fit, flow_row, form_grid, hint, icon_button, ltr, muted, scroll_page
@@ -25,32 +26,6 @@ COLOR_NAMES = {'primary': ('اللون الأساسي', 'Primary colour'), 'seco
                'table_head_text': ('نص رأس الجداول', 'Table header text'), 'box_border': ('إطار الأقسام', 'Section frame'),
                'callout': ('خلفية مربع التنبيه', 'Callout background'), 'table_stripe': ('أسطر الجداول المتناوبة', 'Alternate table rows'),
                'table_border': ('حدود الجداول', 'Table borders'), 'table_text': ('نص خلايا الجداول', 'Table cell text')}
-
-
-class TokenEdit(QWidget):
-    """A header/footer text with a button that inserts a field (page number, issue date…)."""
-
-    def __init__(self, text=''):
-        super().__init__()
-        self.edit = QLineEdit(text)
-        self.edit.setMinimumWidth(220)
-        btn = QToolButton()
-        btn.setText('{…}')
-        btn.setToolTip(L('إدراج حقل', 'Insert a field'))
-        a11y(btn, L('إدراج حقل', 'Insert a field'))
-        m = QMenu(btn)
-        for tok, (ar, en) in TOKENS.items():
-            m.addAction(f'{L(ar, en)}  {tok}', lambda t=tok: self.edit.insert(t))
-        btn.setMenu(m)
-        btn.setPopupMode(QToolButton.InstantPopup)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(4)
-        lay.addWidget(self.edit, 1)
-        lay.addWidget(btn)
-
-    def text(self):
-        return self.edit.text()
 
 
 class DesignTab(QWidget):
@@ -236,8 +211,8 @@ class DesignTab(QWidget):
         field(hg, 4, 2, L('وسط التذييل', 'Footer centre'), self.f_center)
         field(hg, 5, 0, L('نهاية التذييل', 'Footer end'), self.f_end)
         field(hg, 6, 0, L('شكل الغلاف', 'Cover style'), self.cover_style)
-        hg.addWidget(hint(L('الحقول بين القوسين { } تُستبدل عند الطباعة: {page} رقم الصفحة، {pages} عدد الصفحات، {chapter} الباب الحالي، {issue_date} تاريخ الإصدار…',
-                            'Fields in braces { } are replaced when printing: {page} page number, {pages} page count, {chapter} current chapter, {issue_date} issue date…')), 7, 1, 1, 3)
+        hg.addWidget(hint(L('زر «حقل» بجانب كل خانة يُدرج ما يتغير عند الطباعة، مثل [رقم الصفحة] و[عدد الصفحات] و[الباب الحالي] و[تاريخ الإصدار].',
+                            'The «Field» button beside each box inserts what changes when printing, such as [Page number], [Page count], [Current chapter] and [Issue date].')), 7, 1, 1, 3)
         hg.setColumnStretch(1, 1)
         hg.setColumnStretch(3, 1)
         hf = card(L('الترويسة والتذييل والغلاف', 'Header, footer & cover'))
@@ -472,13 +447,13 @@ class DesignTab(QWidget):
         self.h_style.setCurrentIndex(max(0, self.h_style.findData(h.get('style'))))
         self.h_height.setValue(int(h.get('height') or 22))
         self.h_logo.setChecked(bool(h.get('logo')))
-        self.h_start.edit.setText(h.get('start') or '')
-        self.h_center.edit.setText(h.get('center') or '')
-        self.h_end.edit.setText(h.get('end') or '')
+        self.h_start.set_text(h.get('start') or '')
+        self.h_center.set_text(h.get('center') or '')
+        self.h_end.set_text(h.get('end') or '')
         self.f_style.setCurrentIndex(max(0, self.f_style.findData(f.get('style'))))
-        self.f_start.edit.setText(f.get('start') or '')
-        self.f_center.edit.setText(f.get('center') or '')
-        self.f_end.edit.setText(f.get('end') or '')
+        self.f_start.set_text(f.get('start') or '')
+        self.f_center.set_text(f.get('center') or '')
+        self.f_end.set_text(f.get('end') or '')
         self.cover_style.setCurrentIndex(max(0, self.cover_style.findData((lay.get('cover') or {}).get('style', 'wave'))))
         pn = lay['page_numbers']
         self.pn_digits.setCurrentIndex(max(0, self.pn_digits.findData(pn.get('digits', 'latin'))))
@@ -496,9 +471,9 @@ class DesignTab(QWidget):
         tpl = PAGE_NUMBER_FORMATS[key][2]
         for box in (self.f_start, self.f_center, self.f_end):          # the page number moves, the rest stays
             if '{page}' in box.text():
-                box.edit.setText(tpl)
+                box.set_text(tpl)
                 return
-        (self.f_end if not self.f_end.text() else self.f_center).edit.setText(tpl)
+        (self.f_end if not self.f_end.text() else self.f_center).set_text(tpl)
 
     def _asset_labels(self):
         pm = asset_pixmap(self.db, self.assets.get('logo'), 64)
@@ -540,7 +515,8 @@ class DesignTab(QWidget):
         for k, b in self.colors.items():
             c = self.color_values.get(k, '#000000')
             light = QColor(c).lightness() > 150
-            b.setText('\u200e' + c.upper())          # the colour code reads left to right
+            b.setText('')                        # the colour itself, its code only on hover
+            b.setToolTip(c.upper())
             b.setStyleSheet(f'background:{c};color:{"#1e293b" if light else "#ffffff"};border:1px solid #c9d4e3;border-radius:6px')
 
     def _color(self, k):
