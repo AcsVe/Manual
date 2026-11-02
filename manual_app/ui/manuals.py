@@ -4,7 +4,7 @@ import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QComboBox, QDialogButtonBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialogButtonBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QVBoxLayout, QWidget)
 
 from ..core import importer
@@ -14,6 +14,9 @@ from .theme import SizedDialog, button, card, field, fit, form_grid, hint, ltr, 
 
 
 class NewManualDialog(SizedDialog):
+    """A new manual: only a starting structure is chosen; every other detail is optional and can be changed later in
+    «التصميم». The page direction is not asked here: each section may have its own."""
+
     def __init__(self, parent, ctx):
         super().__init__(parent)
         self.ctx = ctx
@@ -21,27 +24,37 @@ class NewManualDialog(SizedDialog):
         self.starter = QComboBox()
         for k, ((ar, en), _) in STARTERS.items():
             self.starter.addItem(L(ar, en), k)
-        self.starter.addItem(L('من ملف موجود (Word أو صفحة ويب أو PDF)…', 'From an existing file (Word, web page or PDF)…'), 'file')
+        self.starter.setCurrentIndex(max(0, self.starter.findData('blank')))
         self.title_ar = QLineEdit()
+        self.title_ar.setPlaceholderText(L('دليل جديد', 'New manual'))
         self.title_en = ltr(QLineEdit())
         self.org_ar = QLineEdit(ctx.db.get('org_ar') or '')
         self.org_en = ltr(QLineEdit(ctx.db.get('org_en') or ''))
         self.lang = QComboBox()
         for k, (ar, en) in LANG_MODES.items():
             self.lang.addItem(L(ar, en), k)
-        self.orient = QComboBox()
-        self.orient.addItem(L('أفقي', 'Landscape'), 'landscape')
-        self.orient.addItem(L('عمودي', 'Portrait'), 'portrait')
-        for w, n in ((self.starter, 420), (self.lang, 320), (self.orient, 160)):
+        for w, n in ((self.starter, 420), (self.lang, 320)):
             fit(w, n)
+        open_file = button(L('فتح ملف موجود بدلاً من ذلك…', 'Open an existing file instead…'), 'folder')
+        open_file.clicked.connect(self._open_file)
         g = form_grid()
         field(g, 0, 0, L('يبدأ من', 'Start from'), self.starter)
-        field(g, 1, 0, L('عنوان الدليل بالعربية *', 'Arabic title *'), self.title_ar)
-        field(g, 2, 0, L('عنوان الدليل بالإنجليزية', 'English title'), self.title_en)
-        field(g, 3, 0, L('اسم المؤسسة بالعربية', 'Organisation (Arabic)'), self.org_ar)
-        field(g, 4, 0, L('اسم المؤسسة بالإنجليزية', 'Organisation (English)'), self.org_en)
-        field(g, 5, 0, L('لغة الدليل', 'Manual language'), self.lang)
-        field(g, 6, 0, L('اتجاه الصفحة', 'Page orientation'), self.orient)
+        field(g, 1, 0, L('عنوان الدليل', 'Manual title'), self.title_ar)
+        self.more = QCheckBox(L('بيانات إضافية (اختيارية)', 'More details (optional)'))
+        g.addWidget(self.more, 2, 1)
+        extra = QWidget()
+        eg = form_grid()
+        eg.setContentsMargins(0, 0, 0, 0)
+        field(eg, 0, 0, L('العنوان بالإنجليزية', 'English title'), self.title_en)
+        field(eg, 1, 0, L('اسم المؤسسة بالعربية', 'Organisation (Arabic)'), self.org_ar)
+        field(eg, 2, 0, L('اسم المؤسسة بالإنجليزية', 'Organisation (English)'), self.org_en)
+        field(eg, 3, 0, L('لغة الدليل', 'Manual language'), self.lang)
+        eg.setColumnStretch(1, 1)
+        extra.setLayout(eg)
+        extra.setVisible(False)
+        self.more.toggled.connect(extra.setVisible)
+        self.more.toggled.connect(lambda _v: self.adjustSize())
+        g.addWidget(extra, 3, 0, 1, 2)
         g.setColumnStretch(1, 1)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText(L('إنشاء', 'Create'))
@@ -50,33 +63,33 @@ class NewManualDialog(SizedDialog):
         bb.accepted.connect(self._ok)
         bb.rejected.connect(self.reject)
         lay = QVBoxLayout(self)
-        lay.addWidget(hint(L('الهيكل المبدئي قابل للتعديل بالكامل: أضف الأقسام أو احذفها أو أعد ترتيبها في المحرر.',
-                             'The starting structure is fully editable: add, delete or reorder sections in the editor.')))
         lay.addLayout(g)
+        lay.addWidget(hint(L('كل ما سبق يُعدَّل لاحقاً من «التصميم»، واتجاه الصفحة (عمودي أو أفقي) يُختار لكل قسم من المحرر.',
+                             'All of this can be changed later in «Design», and the page direction (portrait or landscape) is chosen per section in the editor.')))
+        lay.addWidget(open_file, 0, Qt.AlignLeading)
         lay.addWidget(bb)
-        self.resize(640, 420)
+        self.resize(600, 260)
         self.result_id = None
 
+    def _open_file(self):
+        mid = open_file(self, self.ctx)
+        if mid:
+            self.result_id = mid
+            self.accept()
+
     def _ok(self):
-        if not self.title_ar.text().strip() and not self.title_en.text().strip():
-            error(self, L('اكتب عنوان الدليل.', 'Enter the manual title.'))
-            return
-        layout = dict(DEFAULT_LAYOUT, lang_mode=self.lang.currentData(), orientation=self.orient.currentData())
-        fields = {'title_ar': self.title_ar.text().strip(), 'title_en': self.title_en.text().strip(),
+        title_ar = self.title_ar.text().strip()
+        title_en = self.title_en.text().strip()
+        if not title_ar and not title_en:
+            title_ar, title_en = 'دليل جديد', 'New manual'
+        layout = dict(DEFAULT_LAYOUT, lang_mode=self.lang.currentData(), orientation='portrait')
+        fields = {'title_ar': title_ar, 'title_en': title_en,
                   'org_ar': self.org_ar.text().strip(), 'org_en': self.org_en.text().strip(), 'layout': layout,
                   'issue_date': __import__('datetime').date.today().isoformat()}
         self.ctx.db.set('org_ar', fields['org_ar'])
         self.ctx.db.set('org_en', fields['org_en'])
         from ..core.templates import create_from_starter
-        key = self.starter.currentData()
-        if key == 'file':
-            mid = create_from_starter(self.ctx.db, 'blank', fields)
-            if not import_into(self, self.ctx, mid, None):
-                self.ctx.db.delete_manual(mid)
-                return
-        else:
-            mid = create_from_starter(self.ctx.db, key, fields)
-        self.result_id = mid
+        self.result_id = create_from_starter(self.ctx.db, self.starter.currentData(), fields)
         self.accept()
 
 
@@ -138,56 +151,97 @@ class ImportDialog(SizedDialog):
         return out
 
 
-def import_into(parent, ctx, mid, parent_sid):
-    """Asks for a file and imports it under ``parent_sid`` of manual ``mid``. Returns True when something was added."""
-    path, _ = QFileDialog.getOpenFileName(parent, L('استيراد ملف', 'Import a file'), '',
-                                          L('ملفات مدعومة', 'Supported files') + ' (*.docx *.html *.htm *.pdf)')
-    if not path:
-        return False
-    d = ImportDialog(parent, path)
-    if not d.exec():
-        return False
-    ext = os.path.splitext(path)[1].lower()
+FILE_FILTER = ('ملفات مدعومة / Supported files (*.docx *.pdf *.html *.htm *.txt *.png *.jpg *.jpeg *.bmp *.gif *.webp);;'
+               'Word (*.docx);;PDF (*.pdf);;HTML (*.html *.htm);;Text (*.txt);;Pictures (*.png *.jpg *.jpeg *.bmp *.gif *.webp)')
+
+
+def _bring_in(parent, ctx, mid, parent_sid, path, kind='text', pages=None, image_pages=()):
+    """Reads ``path`` into manual ``mid`` (under ``parent_sid``), tidies it with the checker's safe fixes and returns
+    (section ids, the summary text, the points left) — or None after telling what went wrong."""
     QGuiApplication.setOverrideCursor(Qt.WaitCursor)
     try:
-        if ext == '.docx':
-            secs, imgs = importer.import_docx(path)
-        elif ext in ('.html', '.htm'):
-            secs, imgs = importer.import_html(path)
-        elif ext == '.pdf':
-            pages = d.parse_pages(d.pages.text()) or None
-            secs, imgs = importer.import_pdf(path, pages, set(d.parse_pages(d.image_pages.text())))
-        else:
-            raise ValueError(L('نوع الملف غير مدعوم. الأنواع المدعومة: Word (.docx) وصفحة ويب (.html) وPDF.',
-                               'Unsupported file type. Supported: Word (.docx), web page (.html) and PDF.'))
+        secs, imgs = importer.read_any(path, pages, image_pages)
         if not secs:
-            raise ValueError(L('لم يُعثر على نص في الملف (قد يكون صوراً ممسوحة ضوئياً).', 'No text was found in the file (it may be scanned images).'))
-        ids = importer.add_to_manual(ctx.db, mid, secs, imgs, parent_sid, d.kind.currentData())
+            raise ValueError(L('لم يُعثر في الملف على نص ولا صفحات.', 'Nothing was found in the file.'))
+        ids = importer.add_to_manual(ctx.db, mid, secs, imgs, parent_sid, kind)
+        from ..core import doctor
+        prefs = doctor.load_prefs(ctx.db)
+        tidied = 0
+        if prefs.get('auto_import'):            # the checker's safe fixes on what came in
+            rules = [r for r in doctor.AUTO_ON_IMPORT if r not in (prefs.get('disabled') or [])]
+            tidied = doctor.autofix_sections(ctx.db, mid, ids, rules)
+        left = [x for x in doctor.check(ctx.db, mid, prefs, ctx.workflow, only=set(ids)) if x['sev'] in ('error', 'warning')]
     except Exception as e:  # noqa: BLE001 — a damaged or protected file
         QGuiApplication.restoreOverrideCursor()
-        error(parent, L('تعذّر الاستيراد:', 'The import failed:') + f'\n{e}')
-        return False
-    from ..core import doctor
-    prefs = doctor.load_prefs(ctx.db)
-    tidied = 0
-    if prefs.get('auto_import'):            # the checker's safe fixes on what came in
-        rules = [r for r in doctor.AUTO_ON_IMPORT if r not in (prefs.get('disabled') or [])]
-        tidied = doctor.autofix_sections(ctx.db, mid, ids, rules)
-    left = [x for x in doctor.check(ctx.db, mid, prefs, ctx.workflow, only=set(ids)) if x['sev'] in ('error', 'warning')]
+        error(parent, L('تعذّر فتح الملف:', 'The file cannot be opened:') + f'\n{e}')
+        return None
     QGuiApplication.restoreOverrideCursor()
     blocks = sum(len(s['blocks']) for s in secs)
+    pics = sum(1 for s in secs for b in s['blocks'] if b.get('kind') == 'image' and (b.get('style') or {}).get('fullpage'))
     ctx.db.audit('import', file=os.path.basename(path), sections=len(ids), tidied=tidied)
     text = L(f'استُورد {len(ids)} قسماً و{blocks} كتلة و{len(imgs)} صورة.', f'Imported {len(ids)} sections, {blocks} blocks and {len(imgs)} images.')
+    if pics:
+        text += L(f' {pics} صفحة لا نص فيها (مسح ضوئي أو رسم) أُدخلت صفحاتٍ كاملة كما هي.',
+                  f' {pics} page(s) without text (a scan or a drawing) came in as whole pages.')
     if tidied:
         text += L(f' ضبط المدقق {tidied} موضعاً تلقائياً.', f' The checker tidied {tidied} place(s).')
+    return ids, text, left
+
+
+def _report(parent, ctx, text, left):
     if left and confirm(parent, text + L(f'\n\nبقيت {len(left)} ملاحظة (أخطاء وتحذيرات) تحتاج إلى مراجعة. هل تريد عرضها في المدقق؟',
                                           f'\n\n{len(left)} point(s) (errors and warnings) need a look. Show them in the checker?')):
         if ctx.window:                      # after the caller has opened the manual
             from PySide6.QtCore import QTimer
             QTimer.singleShot(400, lambda: ctx.window.open_doctor(run=True))
-        return True
+        return
     info(parent, text + L(' راجعها في المحرر.', ' Review them in the editor.'))
+
+
+def import_into(parent, ctx, mid, parent_sid):
+    """Asks for a file and imports it under ``parent_sid`` of manual ``mid``. Returns True when something was added."""
+    path, _ = QFileDialog.getOpenFileName(parent, L('استيراد ملف', 'Import a file'), '', FILE_FILTER)
+    if not path:
+        return False
+    d = ImportDialog(parent, path)
+    if not d.exec():
+        return False
+    pages = image_pages = None
+    if os.path.splitext(path)[1].lower() == '.pdf':
+        pages = d.parse_pages(d.pages.text()) or None
+        image_pages = set(d.parse_pages(d.image_pages.text()))
+    done = _bring_in(parent, ctx, mid, parent_sid, path, d.kind.currentData(), pages, image_pages or ())
+    if not done:
+        return False
+    _report(parent, ctx, done[1], done[2])
     return True
+
+
+def open_file(parent, ctx, path=None):
+    """Opens any supported file as a new manual at once, with no questions: the title is the file name, the page
+    direction follows the file, the rest takes the usual settings (all changeable later). Returns the new manual."""
+    if not path:
+        path, _ = QFileDialog.getOpenFileName(parent, L('فتح ملف', 'Open a file'), ctx.db.get('last_dir') or '', FILE_FILTER)
+        if not path:
+            return None
+    ctx.db.set('last_dir', os.path.dirname(path))
+    from ..core.templates import create_from_starter
+    name = os.path.splitext(os.path.basename(path))[0]
+    ar = importer.is_arabic(name)
+    layout = dict(DEFAULT_LAYOUT, orientation=importer.file_orientation(path) or 'portrait')
+    fields = {'title_ar': name if ar else '', 'title_en': '' if ar else name, 'layout': layout,
+              'org_ar': ctx.db.get('org_ar') or '', 'org_en': ctx.db.get('org_en') or '',
+              'issue_date': __import__('datetime').date.today().isoformat()}
+    mid = create_from_starter(ctx.db, 'blank', fields)
+    done = _bring_in(parent, ctx, mid, None, path)
+    if not done:
+        ctx.db.delete_manual(mid)
+        return None
+    ctx.manual_id = mid
+    if ctx.window:
+        ctx.window.open_editor()
+    _report(parent, ctx, done[1], done[2])
+    return mid
 
 
 class ManualsTab(QWidget):
@@ -196,6 +250,10 @@ class ManualsTab(QWidget):
         self.ctx, self.db = ctx, ctx.db
         new = button(L('دليل جديد…', 'New manual…'), 'plus', 'primary')
         new.clicked.connect(self.new)
+        opener = button(L('فتح ملف…', 'Open a file…'), 'folder',
+                        tip=L('Word أو PDF أو صفحة ويب أو نص أو صورة: يصبح دليلاً جديداً مباشرة',
+                              'Word, PDF, web page, text or picture: it becomes a new manual at once'))
+        opener.clicked.connect(lambda: open_file(self, self.ctx) and self.reload())
         self.table = DataTable(
             [(L('العنوان', 'Title'), 'text'), (L('العنوان بالإنجليزية', 'English title'), 'text'),
              (L('المؤسسة', 'Organisation'), 'text'), (L('الأقسام', 'Sections'), 'num'),
@@ -210,6 +268,7 @@ class ManualsTab(QWidget):
         self.table.activated.connect(lambda i: self.open_ids([i]))
         top = QHBoxLayout()
         top.addWidget(new)
+        top.addWidget(opener)
         top.addStretch(1)
         box = card(L('الأدلة', 'Manuals'))
         bl = QVBoxLayout(box)
@@ -237,7 +296,8 @@ class ManualsTab(QWidget):
         d = NewManualDialog(self, self.ctx)
         if d.exec() and d.result_id:
             self.reload()
-            self.open_ids([d.result_id])
+            if self.ctx.manual_id != d.result_id:        # a file opened from the dialog is already open
+                self.open_ids([d.result_id])
 
     def open_ids(self, ids):
         if ids:

@@ -13,7 +13,7 @@ EXCLUDE = ['PySide6.Qt3DCore', 'PySide6.Qt3DRender', 'PySide6.QtQuick3D', 'PySid
 
 datas = [('assets', 'assets')] + collect_data_files('docx') + collect_data_files('pdfminer')
 a = Analysis(['run.py'], pathex=[], binaries=[], datas=datas,
-             hiddenimports=['pypdf', 'PySide6.QtSvg', 'PySide6.QtSvgWidgets', 'PySide6.QtPdf', 'PySide6.QtWebEngineCore',
+             hiddenimports=['pypdf', 'PySide6.QtNetwork', 'PySide6.QtSvg', 'PySide6.QtSvgWidgets', 'PySide6.QtPdf', 'PySide6.QtWebEngineCore',
                             'PySide6.QtWebEngineWidgets', 'PySide6.QtPrintSupport', 'pdfminer', 'docx', 'lxml.html'],
              hookspath=[], runtime_hooks=[], excludes=EXCLUDE, cipher=block_cipher, noarchive=False)
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)

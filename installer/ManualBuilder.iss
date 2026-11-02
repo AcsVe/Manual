@@ -54,5 +54,26 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; Tasks: desktopicon
 
+[Registry]
+; «Open with» on the files the program reads (never the default program for them)
+Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#MyAppName}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".docx"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.docx\OpenWithList\{#MyAppExe}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".pdf"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.pdf\OpenWithList\{#MyAppExe}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".html"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.html\OpenWithList\{#MyAppExe}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".htm"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.htm\OpenWithList\{#MyAppExe}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".txt"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.txt\OpenWithList\{#MyAppExe}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".png"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.png\OpenWithList\{#MyAppExe}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".jpg"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.jpg\OpenWithList\{#MyAppExe}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".jpeg"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.jpeg\OpenWithList\{#MyAppExe}"; Flags: uninsdeletekey
+
 [Run]
 Filename: "{app}\{#MyAppExe}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent

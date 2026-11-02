@@ -425,6 +425,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.ctx = ctx
         ctx.window = self
+        self.setAcceptDrops(True)              # a file dropped on the window opens as a new manual
         self.tabs = QTabWidget()
         a11y(self.tabs, L('أقسام البرنامج', 'Program sections'))
         self.home = HomeTab(ctx)
@@ -474,6 +475,34 @@ class MainWindow(QMainWindow):
         self.show_page(self.doctor)
         if run:
             self.doctor.run()
+
+    @staticmethod
+    def _dropped_files(e):
+        from ..core.importer import OPENABLE
+        if not e.mimeData().hasUrls():
+            return []
+        return [u.toLocalFile() for u in e.mimeData().urls()
+                if u.isLocalFile() and os.path.splitext(u.toLocalFile())[1].lower() in OPENABLE]
+
+    def dragEnterEvent(self, e):           # noqa: N802 (Qt name)
+        if self._dropped_files(e):
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):                # noqa: N802 (Qt name)
+        files = self._dropped_files(e)
+        if files:
+            e.acceptProposedAction()
+            self.open_files(files)
+
+    def open_files(self, files):
+        """Files from the desktop, «Open with» or a drop: each becomes a new manual (the last one stays open)."""
+        from .manuals import open_file
+        self.raise_()
+        self.activateWindow()
+        for f in files:
+            if os.path.isfile(f):
+                open_file(self, self.ctx, f)
+        self.home.reload()
 
     def open_design(self, tab='page'):
         self.show_page(self.design)

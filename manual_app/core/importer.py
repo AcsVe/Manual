@@ -573,8 +573,11 @@ def _looks_reversed(t):
     return rev > fwd
 
 
-def import_pdf(path, pages=None, image_pages=()):
-    """pages: page numbers (1-based) to read (None = all); image_pages: pages brought in as pictures."""
+def import_pdf(path, pages=None, image_pages=(), auto_images=True):
+    """pages: page numbers (1-based) to read (None = all); image_pages: pages brought in as pictures.
+    ``auto_images``: a page with almost no text (a scan, a drawing, a chart) comes in as a whole-page picture, so
+    nothing on it is lost and a scanned file opens as it is."""
+    image_pages = set(image_pages or ())
     from pdfminer.high_level import extract_pages
     from pdfminer.layout import LAParams, LTChar, LTTextContainer, LTTextLine
     lines_by_page = []
@@ -601,9 +604,13 @@ def import_pdf(path, pages=None, image_pages=()):
                 out.append({'x0': ln.x0 / W, 'x1': ln.x1 / W, 'y': 1 - ln.y1 / H, 'size': size, 'bold': bold, 'text': text})
                 sizes.append(size)
         out.sort(key=lambda r: (round(r['y'], 3), -r['x1'] if is_arabic(r['text']) else r['x0']))
-        lines_by_page.append((pages[pno - 1] if pages else pno, out))
-    if not sizes:
+        real = pages[pno - 1] if pages else pno
+        if auto_images and sum(len(r['text']) for r in out) < 60:
+            image_pages.add(real)
+        lines_by_page.append((real, out))
+    if not sizes and not image_pages:
         return [], []
+    sizes = sizes or [10]
     body = sorted(sizes)[len(sizes) // 2]
     # header and footer: lines in the top/bottom band that repeat on many pages
     from collections import Counter
@@ -620,7 +627,8 @@ def import_pdf(path, pages=None, image_pages=()):
             png = render_pdf_page(path, pno)
             if png:
                 images.append((png, 'image/png'))
-                sections[-1]['blocks'].append({'kind': 'image', 'ar': '', 'en': '', 'data': {'asset': len(images) - 1, 'width': 100}})
+                sections[-1]['blocks'].append({'kind': 'image', 'ar': '', 'en': '', 'data': {'asset': len(images) - 1, 'width': 100},
+                                               'style': {'fullpage': True}})
             continue
         ls = [r for r in ls if not ((r['y'] < 0.12 or r['y'] > 0.9) and rep[re.sub(r'\d+', '#', r['text'])] >= many)]
         ls = [r for r in ls if not re.fullmatch(r'(Page|P a g e|صفحة)?\s*\d+\s*(\|\s*\d+)?', r['text'])]
@@ -693,6 +701,92 @@ def render_pdf_page(path, page_no, dpi=150):
     buf.open(QIODevice.WriteOnly)
     img.save(buf, 'PNG')
     return bytes(buf.data())
+
+
+def import_images(paths):
+    """Pictures (a scanned page, a poster, a chart): each one a whole page."""
+    sec = _new(1, *_title_split(os.path.splitext(os.path.basename(paths[0]))[0]))
+    images = []
+    mimes = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.bmp': 'image/bmp', '.gif': 'image/gif',
+             '.webp': 'image/webp'}
+    for p in paths:
+        with open(p, 'rb') as f:
+            images.append((f.read(), mimes.get(os.path.splitext(p)[1].lower(), 'image/png')))
+        sec['blocks'].append({'kind': 'image', 'ar': '', 'en': '', 'data': {'asset': len(images) - 1, 'width': 100},
+                              'style': {'fullpage': True}})
+    return [sec], images
+
+
+def import_text(path):
+    """A plain text file: an empty line separates paragraphs; each goes to the side of its language."""
+    for enc in ('utf-8-sig', 'cp1256', 'latin-1'):
+        try:
+            with open(path, encoding=enc) as f:
+                text = f.read()
+            break
+        except UnicodeDecodeError:
+            continue
+    sec = _new(1, *_title_split(os.path.splitext(os.path.basename(path))[0]))
+    for para in re.split(r'\n\s*\n', text):
+        para = para.strip()
+        if para:
+            sec['blocks'].append({'kind': 'paragraph', 'ar': escape(para) if is_arabic(para) else '',
+                                  'en': '' if is_arabic(para) else escape(para)})
+    return [sec], []
+
+
+OPENABLE = {'.docx': 'Word', '.pdf': 'PDF', '.html': 'HTML', '.htm': 'HTML', '.txt': 'TXT', '.png': 'PNG',
+            '.jpg': 'JPG', '.jpeg': 'JPG', '.bmp': 'BMP', '.gif': 'GIF', '.webp': 'WEBP'}
+
+
+def read_any(path, pdf_pages=None, image_pages=()):
+    """Any supported file: (sections, images). Raises ValueError with a readable reason."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == '.doc':
+        raise ValueError('صيغة Word القديمة (.doc) غير مقروءة: احفظ الملف من Word بصيغة .docx ثم افتحه.\n'
+                         'The old Word format (.doc) cannot be read: save it from Word as .docx, then open it.')
+    if ext not in OPENABLE:
+        raise ValueError('نوع الملف غير مدعوم. الأنواع المدعومة: Word (.docx) وPDF وصفحة ويب (.html) ونص (.txt) والصور.\n'
+                         'Unsupported file type. Supported: Word (.docx), PDF, web page (.html), text (.txt) and pictures.')
+    if ext == '.docx':
+        return import_docx(path)
+    if ext in ('.html', '.htm'):
+        return import_html(path)
+    if ext == '.pdf':
+        return import_pdf(path, pdf_pages, image_pages)
+    if ext == '.txt':
+        return import_text(path)
+    return import_images([path])
+
+
+def file_orientation(path):
+    """The direction most pages of the file have ('portrait' or 'landscape'), or None when it cannot be told."""
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        if ext == '.pdf':
+            from pdfminer.pdfpage import PDFPage
+            wide = tall = 0
+            with open(path, 'rb') as f:
+                for i, pg in enumerate(PDFPage.get_pages(f)):
+                    if i >= 60:
+                        break
+                    x0, y0, x1, y1 = pg.mediabox
+                    w, h = abs(x1 - x0), abs(y1 - y0)
+                    if (pg.attrs.get('Rotate') or 0) % 180:
+                        w, h = h, w
+                    wide, tall = wide + (w > h), tall + (w <= h)
+            return None if not (wide or tall) else ('landscape' if wide > tall else 'portrait')
+        if ext == '.docx':
+            from docx import Document
+            sec = Document(path).sections[0]
+            return 'landscape' if sec.page_width > sec.page_height else 'portrait'
+        if ext in ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp'):
+            with open(path, 'rb') as f:
+                w, h = image_size(f.read())
+            return None if not w else ('landscape' if w > h else 'portrait')
+    except Exception:  # noqa: BLE001 — the default direction is kept
+        return None
+    return None
 
 
 def pdf_page_count(path):

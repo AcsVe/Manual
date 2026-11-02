@@ -137,6 +137,48 @@ def selftest(out):
     return 0 if ok else 1
 
 
+INSTANCE = 'ManualBuilder-' + (os.environ.get('USERNAME') or os.environ.get('USER') or 'user')
+
+
+def _send_to_running(files):
+    """When the program is already open, hands it the files to open and returns True."""
+    from PySide6.QtNetwork import QLocalSocket
+    sock = QLocalSocket()
+    sock.connectToServer(INSTANCE)
+    if not sock.waitForConnected(400):
+        return False
+    sock.write(('\n'.join(files)).encode('utf-8'))
+    sock.flush()
+    sock.waitForBytesWritten(1000)
+    sock.disconnectFromServer()
+    return True
+
+
+def _listen(window):
+    """Receives the files a second start of the program was asked to open."""
+    from PySide6.QtNetwork import QLocalServer
+    QLocalServer.removeServer(INSTANCE)
+    server = QLocalServer(window)
+    if not server.listen(INSTANCE):
+        return None
+
+    def take():
+        conn = server.nextPendingConnection()
+        if conn is None:
+            return
+
+        def read():
+            data = bytes(conn.readAll()).decode('utf-8', 'ignore')
+            files = [f for f in data.splitlines() if f.strip()]
+            if files:
+                window.showNormal()
+                window.open_files(files)
+        conn.readyRead.connect(read)
+        conn.disconnected.connect(conn.deleteLater)
+    server.newConnection.connect(take)
+    return server
+
+
 def main(argv=None):
     argv = argv if argv is not None else sys.argv
     if '--fingerprint' in argv:
@@ -144,8 +186,11 @@ def main(argv=None):
         return 0
     if '--selftest' in argv:
         return selftest(argv[argv.index('--selftest') + 1] if len(argv) > argv.index('--selftest') + 1 else 'selftest.txt')
+    files = [os.path.abspath(a) for a in argv[1:] if not a.startswith('-') and os.path.isfile(a)]
     _web_engine_flags()
     app = QApplication(argv)
+    if files and _send_to_running(files):
+        return 0                           # the program already open takes the file(s)
     app.setApplicationName('ManualBuilder')
     app.setApplicationVersion(__version__)
     if os.path.isfile(resource('icon.ico')):
@@ -170,6 +215,10 @@ def main(argv=None):
     from .ui.main_window import MainWindow
     w = MainWindow(ctx)
     w.show()
+    server = _listen(w)                    # noqa: F841 — kept alive while the window is open
+    if files:
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(400, lambda: w.open_files(files))
     code = app.exec()
     ctx.db.close()
     return code
