@@ -1108,7 +1108,9 @@ document.addEventListener('click',function(e){var t=e.target,side=t.closest('.en
  var m=t.closest('.pagedjs_margin');if(m){mark(m);console.log('MBPICK m '+(m.className.indexOf('bottom')>=0?'footer':'header')+span(t.closest('.pagedjs_page')));return;}
  var p=t.closest('.pagedjs_page');
  if(p){var bs=p.querySelectorAll('[data-b]');mark(p.querySelector('.pagedjs_pagebox'));
-  if(e.clientY<p.querySelector('.pagedjs_area').getBoundingClientRect().top){console.log('MBPICK m header'+span(p));return;}
+  var ar=p.querySelector('.pagedjs_area').getBoundingClientRect();
+  if(e.clientY<ar.top){console.log('MBPICK m header'+span(p));return;}
+  if(e.clientY>ar.bottom){console.log('MBPICK m footer'+span(p));return;}
   console.log('MBPICK p page '+(bs.length?bs[0].getAttribute('data-b'):'')+' '+(bs.length?bs[bs.length-1].getAttribute('data-b'):''));return;}
 },true);})();
 """
@@ -1235,7 +1237,9 @@ class Preview(QWidget):
         self._scroll_back = None
         if self.view.url().isValid() and not self.view.url().isEmpty():
             self.view.page().runJavaScript('window.scrollY', 0, lambda y: setattr(self, '_scroll_back', y))
-        self.view.load(QUrl.fromLocalFile(path))
+        url = QUrl.fromLocalFile(path)
+        url.setQuery(f'v={digest}')          # a new address for new content: the engine never shows a kept old copy
+        self.view.load(url)
         self.state.setText('')
 
 

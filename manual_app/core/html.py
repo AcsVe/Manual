@@ -341,17 +341,59 @@ class Renderer:
                     css.append(f'@font-face{{font-family:"MB {name}";src:url("{url}") format("woff2")}}')
         return '\n'.join(css)
 
-    def wave_svg(self, height_mm, flip=False, full=False):
-        hd = self.lay['header']
-        c = dict(self.lay['colors'], primary=_hex(hd.get('color1')) or self.lay['colors']['primary'],
-                 secondary=_hex(hd.get('color2')) or self.lay['colors']['secondary'])
+    def wave_svg(self, height_mm, flip=False, full=False, which='header'):
+        part = self.lay.get(which) or {}
+        c = dict(self.lay['colors'], primary=_hex(part.get('color1')) or self.lay['colors']['primary'],
+                 secondary=_hex(part.get('color2')) or self.lay['colors']['secondary'])
         w, h = 1000, 100
         p1 = 'M0,0 H1000 V55 C780,105 560,20 330,62 C190,88 80,70 0,52 Z'
         p2 = 'M0,0 H1000 V38 C760,88 540,8 320,48 C180,72 70,58 0,40 Z'
-        tr = ' transform="translate(1000,0) scale(-1,1)"' if flip else ''
+        sx, tx = (-1, 1000) if flip else (1, 0)
+        sy, ty = (-1, 100) if which == 'footer' else (1, 0)          # the footer wave rises from the bottom edge
+        tr = f' transform="translate({tx},{ty}) scale({sx},{sy})"' if (flip or which == 'footer') else ''
         svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" preserveAspectRatio="none">'
                f'<g{tr}><path d="{p1}" fill="{c["secondary"]}" opacity="0.55"/><path d="{p2}" fill="{c["primary"]}"/></g></svg>')
         return 'data:image/svg+xml;base64,' + base64.b64encode(svg.encode()).decode()
+
+    def band_image_uri(self, bg, width_mm, height_mm):
+        """A picture placed inside the header or footer band as described (fit, position, size, turning, strength):
+        an SVG of the band's size holds it, so it never spills onto the page."""
+        bg = BG.normalize(bg)
+        inner = self.bg_uri(bg)
+        if not inner:
+            return ''
+        W, H = width_mm * 10, height_mm * 10
+        pos = bg['pos']
+        ax = 'xMax' if 'right' in pos else 'xMin' if 'left' in pos else 'xMid'
+        ay = 'YMin' if 'top' in pos else 'YMax' if 'bottom' in pos else 'YMid'
+        par = {'cover': f'{ax}{ay} slice', 'contain': f'{ax}{ay} meet', 'stretch': 'none'}.get(bg['fit'], f'{ax}{ay} meet')
+        iw = W * bg['scale'] / 100 if bg['fit'] == 'width' else W
+        ix = (W - iw) * (1 if ax == 'xMax' else 0 if ax == 'xMin' else 0.5)
+        fill = f'<rect width="{W:.0f}" height="{H:.0f}" fill="{bg["color"]}"/>' if bg.get('color') else ''
+        svg = (f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 {W:.0f} {H:.0f}" '
+               f'preserveAspectRatio="none">{fill}<image x="{ix:.0f}" y="0" width="{iw:.0f}" height="{H:.0f}" '
+               f'preserveAspectRatio="{par}" href="{inner}" xlink:href="{inner}"/></svg>')
+        return 'data:image/svg+xml;base64,' + base64.b64encode(svg.encode()).decode()
+
+    def band_layer(self, which, pw):
+        """The drawing of the header ('top') or footer ('bottom') band as one background layer, or ''."""
+        part = self.lay.get(which) or {}
+        style = part.get('style')
+        edge = 'top' if which == 'header' else 'bottom'
+        hgt = float(part.get('height') or (22 if which == 'header' else 14))
+        rtl = self.lm != 'en'
+        c1 = _hex(part.get('color1')) or self.lay['colors']['primary']
+        if style == 'wave':
+            return f'url("{self.wave_svg(hgt, flip=rtl, which=which)}") {edge} left / 100% {hgt}mm no-repeat'
+        if style == 'band':
+            return f'linear-gradient({c1},{c1}) {edge} left / 100% {hgt * 0.55:.1f}mm no-repeat'
+        if style == 'image':
+            img = part.get('image_bg') or ({'asset_id': part.get('image_id'), 'fit': 'stretch'} if part.get('image_id') else None)
+            if img and BG.active(img):
+                uri = self.band_image_uri(img, pw, hgt)
+                if uri:
+                    return f'url("{uri}") {edge} left / 100% {hgt}mm no-repeat'
+        return ''
 
     def css(self):
         lay, c, f = self.lay, self.lay['colors'], self.lay['fonts']
@@ -362,24 +404,20 @@ class Renderer:
         rtl = self.lm != 'en'
         start, end = ('right', 'left') if rtl else ('left', 'right')
         hd, ft = lay['header'], lay['footer']
-        header_bg = ''
         hs = hd.get('style')
         hh = float(hd.get('height') or 22)
-        if hs == 'wave':
-            header_bg = f'url("{self.wave_svg(hh, flip=rtl)}") top left / 100% {hh}mm no-repeat'
-        elif hs == 'band':
-            band = _hex(hd.get('color1')) or c['primary']
-            header_bg = f'linear-gradient({band},{band}) top left / 100% {hh * 0.55:.1f}mm no-repeat'
-        elif hs == 'image' and hd.get('image_id'):
-            header_bg = f'url("{self.asset_uri(hd["image_id"])}") top center / 100% {hh}mm no-repeat'
+        header_bg = self.band_layer('header', pw)
+        footer_bg = self.band_layer('footer', pw)
         layers = []
         if hd.get('logo') and self.m.get('logo_id'):
             logo_h = max(10, hh * 0.62)
             layers.append(f'url("{self.asset_uri(self.m["logo_id"])}") top {hh * 0.15:.1f}mm {start} 8mm / auto {logo_h:.1f}mm no-repeat')
         if header_bg:
             layers.append(header_bg)
+        if footer_bg:
+            layers.append(footer_bg)
         head_layers = list(layers)        # logo and header drawing: on every page, also those with their own background
-        logo_layers = [x for x in layers if x != header_bg]
+        logo_layers = [x for x in layers if x not in (header_bg, footer_bg)]
         pbg = BG.of_page(lay)
         front_css = []
         if BG.active(pbg) and pbg['layer'] == 'behind':
@@ -397,7 +435,9 @@ class Renderer:
                 return ''
             return f'@{pos}{{content:{content};{extra}}}'
         hd_extra = f'color:{head_col};font-size:8.5pt;font-weight:700;vertical-align:top;padding-top:{hh * 0.18:.1f}mm;{line_css}'
-        ft_extra = f'color:{_hex(ft.get("text_color")) or "#55607a"};font-size:8pt;vertical-align:middle;{foot_line}'
+        fs = ft.get('style')
+        ft_col = _hex(ft.get('text_color')) or ('#ffffff' if fs in ('wave', 'band') else '#55607a')
+        ft_extra = f'color:{ft_col};font-size:8pt;vertical-align:middle;{foot_line}'
         margin_boxes = ''.join([
             box(f'top-{start}', hd.get('start', ''), hd_extra), box('top-center', hd.get('center', ''), hd_extra),
             box(f'top-{end}', hd.get('end', ''), hd_extra + f'text-align:{end};'),
@@ -441,6 +481,8 @@ class Renderer:
         plain_col = _hex(hd.get('text_color')) if hs not in ('wave', 'band') else None
         plain_col = plain_col or c['primary']
         plain_boxes = ''.join(f'@{pos}{{color:{plain_col}}}' for pos in ('top-left', 'top-center', 'top-right'))
+        if fs in ('wave', 'band', 'image'):         # the footer text, too, has to read on white without its shape
+            plain_boxes += ''.join(f'@{pos}{{color:#55607a}}' for pos in ('bottom-left', 'bottom-center', 'bottom-right'))
         front_css.append(turned('oriTp'))
         named_runs = (f'@page oriT{{size:{ph}mm {pw}mm}} @page oriN{{size:{pw}mm {ph}mm}} '
                       f'@page oriTp{{size:{ph}mm {pw}mm;{plain_bg}{plain_boxes}}} @page oriNp{{size:{pw}mm {ph}mm;{plain_bg}{plain_boxes}}} '
@@ -672,7 +714,7 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
     def section(self, s, depth):
         self._sid = s['id']
         kind = s['kind']
-        if kind == 'image' and self.mode == 'print':
+        if self.mode == 'print' and kind not in ('cover', 'chapter', 'toc'):
             bl = self.db.blocks(s['id'])
             if bl and all(b['kind'] == 'image' and (b.get('style') or {}).get('fullpage') for b in bl):
                 # pages that are whole images: no frame or title of their own

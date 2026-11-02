@@ -174,8 +174,8 @@ class DesignTab(QWidget):
         h_clear.clicked.connect(lambda: self._set_asset('header', None))
         self.h_start, self.h_center, self.h_end = TokenEdit(), TokenEdit(), TokenEdit()
         self.f_style = QComboBox()
-        self.f_style.addItem(L('خط فاصل', 'Separator line'), 'line')
-        self.f_style.addItem(L('بدون', 'None'), 'none')
+        for k, (ar, en) in HEADER_STYLES.items():
+            self.f_style.addItem(L(ar, en), k)
         self.f_start, self.f_center, self.f_end = TokenEdit(), TokenEdit(), TokenEdit()
         self.cover_style = QComboBox()
         for k in ('wave', 'band', 'none'):
@@ -548,11 +548,13 @@ class DesignTab(QWidget):
             'colors': self.color_values, 'boxes': self.boxes.isChecked(), 'numbering': self.numbering.isChecked(),
             'policy_footer': self.policy_footer.isChecked(), 'draft_mark': self.draft_mark.isChecked(),
             'toc_depth': self.toc_depth.value(), 'watermark': self.watermark.text().strip(),
-            'header': {'style': self.h_style.currentData(), 'height': self.h_height.value(), 'logo': self.h_logo.isChecked(),
-                       'start': self.h_start.text(), 'center': self.h_center.text(), 'end': self.h_end.text(),
-                       'image_id': self.assets.get('header')},
-            'footer': {'style': self.f_style.currentData(), 'start': self.f_start.text(), 'center': self.f_center.text(),
-                       'end': self.f_end.text()},
+            # what this page does not show (colours, a placed picture…) is kept as it is
+            'header': dict(lay['header'], style=self.h_style.currentData(), height=self.h_height.value(),
+                           logo=self.h_logo.isChecked(), start=self.h_start.text(), center=self.h_center.text(),
+                           end=self.h_end.text(), image_id=self.assets.get('header'),
+                           image_bg=lay['header'].get('image_bg') if self.assets.get('header') == lay['header'].get('image_id') else None),
+            'footer': dict(lay['footer'], style=self.f_style.currentData(), start=self.f_start.text(),
+                           center=self.f_center.text(), end=self.f_end.text()),
             'cover': dict({k: v for k, v in (lay.get('cover') or {}).items() if k not in ('bg_id', 'bg_opacity')},
                           style=self.cover_style.currentData(), bg=self.bgs.get('cover')),
             'page_bg': self.bgs.get('page'), 'page_bg_id': None, 'align': self.align.currentData(),

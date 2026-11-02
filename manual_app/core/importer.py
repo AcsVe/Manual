@@ -561,6 +561,79 @@ def fix_arabic(text):
     return re.sub(r'\s+', ' ', t).strip()
 
 
+_LTR = re.compile(r'[A-Za-z0-9٠-٩۰-۹@#%&_+=]')
+_MIRROR = str.maketrans('()[]{}<>«»', ')(][}{><»«')
+
+
+def line_from_chars(chars):
+    """A PDF line put in reading order from where each letter actually sits on the page, not from the order the
+    file stores them in (some files keep Arabic in display order, others in reading order; the positions are the
+    same in both). Each stored glyph stays whole, so a lam-alef ligature keeps its two letters in their order.
+    ``chars``: [(x0, x1, size, text)]."""
+    if not chars:
+        return ''
+    cells = sorted(chars, key=lambda c: (round(c[0], 1), c[1]))
+    units = []                                   # visual order, left to right, with spaces from the gaps
+    prev = None
+    for x0, x1, size, txt in cells:
+        if prev is not None and x0 - prev > max(1.0, size * 0.18) and units and units[-1] != ' ':
+            units.append(' ')
+        if txt.strip() or not units or units[-1] != ' ':
+            units.append(txt if txt.strip() else ' ')
+        prev = max(prev or x1, x1)
+    vis = ''.join(units)
+    if not AR.search(vis):
+        return re.sub(r'\s+', ' ', vis).strip()
+    units.reverse()                              # right to left …
+    out, i = [], 0
+    while i < len(units):                        # … except runs of Latin letters and digits, which read left to right
+        u = units[i]
+        if _LTR.search(u):
+            j = i
+            while j + 1 < len(units) and (_LTR.search(units[j + 1]) or (units[j + 1] in '.,:/-' and j + 2 < len(units)
+                                                                       and _LTR.search(units[j + 2]))
+                                          or (units[j + 1] == ' ' and j + 2 < len(units) and LATIN.search(units[j + 2])
+                                              and LATIN.search(u))):
+                j += 1
+            out.extend(reversed(units[i:j + 1]))
+            i = j + 1
+        else:
+            out.append(u.translate(_MIRROR) if len(u) == 1 else u)
+            i += 1
+    text = unicodedata.normalize('NFKC', ''.join(out))
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def merge_line_pieces(frags):
+    """Pieces of one printed line that the PDF reader split apart (around numbers or brackets inside Arabic text) are
+    joined again; an English column beside an Arabic one stays apart."""
+    frags = sorted(frags, key=lambda f: (-round(f['y1'], 0), f['x0']))
+    out = []
+    for f in frags:
+        size = max(c.size for c in f['chars'])
+        joined = False
+        for g in out:
+            gsize = max(c.size for c in g['chars'])
+            same_line = abs(g['y0'] - f['y0']) < 0.45 * max(size, gsize) and abs(g['y1'] - f['y1']) < 0.6 * max(size, gsize)
+            gap = max(f['x0'] - g['x1'], g['x0'] - f['x1'])
+            if not same_line or gap > 3.5 * max(size, gsize):
+                continue
+            a_f, a_g = bool(AR.search(f['raw'])), bool(AR.search(g['raw']))
+            l_f, l_g = bool(LATIN.search(f['raw'])), bool(LATIN.search(g['raw']))
+            if (a_f and l_g and not a_g) or (a_g and l_f and not a_f):
+                if gap > 1.2 * max(size, gsize):            # an English column beside an Arabic one
+                    continue
+            g['chars'] = g['chars'] + f['chars']
+            g['x0'], g['x1'] = min(g['x0'], f['x0']), max(g['x1'], f['x1'])
+            g['y0'], g['y1'] = min(g['y0'], f['y0']), max(g['y1'], f['y1'])
+            g['raw'] = g['raw'] + ' ' + f['raw']
+            joined = True
+            break
+        if not joined:
+            out.append(dict(f))
+    return out
+
+
 _COMMON = ('ال', 'في', 'من', 'على', 'إلى', 'الى', 'أن', 'عن', 'مع', 'هذا', 'هذه')
 
 
@@ -585,7 +658,7 @@ def import_pdf(path, pages=None, image_pages=(), auto_images=True):
     want = [p - 1 for p in pages] if pages else None
     for pno, pg in enumerate(extract_pages(path, page_numbers=want, laparams=LAParams(line_margin=0.4)), 1):
         W, H = pg.width, pg.height
-        out = []
+        frags = []
         for el in pg:
             if not isinstance(el, LTTextContainer):
                 continue
@@ -593,16 +666,21 @@ def import_pdf(path, pages=None, image_pages=(), auto_images=True):
                 if not isinstance(ln, LTTextLine):
                     continue
                 chars = [c for c in ln if isinstance(c, LTChar)]
-                raw = ln.get_text().strip()
-                if not raw or not chars:
-                    continue
-                size = round(max(c.size for c in chars), 1)
-                bold = sum(1 for c in chars if 'bold' in c.fontname.lower()) > len(chars) / 2
-                if re.fullmatch(r'(\S\s){3,}\S?.*', raw):          # «P a g e  7» → «Page 7»
-                    raw = re.sub(r'(?<=\S) (?=\S)', '', raw)
-                text = fix_arabic(raw) if AR.search(raw) else re.sub(r'\s+', ' ', raw)
-                out.append({'x0': ln.x0 / W, 'x1': ln.x1 / W, 'y': 1 - ln.y1 / H, 'size': size, 'bold': bold, 'text': text})
-                sizes.append(size)
+                if chars and ln.get_text().strip():
+                    frags.append({'x0': ln.x0, 'x1': ln.x1, 'y0': ln.y0, 'y1': ln.y1, 'chars': chars, 'raw': ln.get_text()})
+        out = []
+        for f in merge_line_pieces(frags):
+            chars, raw = f['chars'], f['raw'].strip()
+            size = round(max(c.size for c in chars), 1)
+            bold = sum(1 for c in chars if 'bold' in c.fontname.lower()) > len(chars) / 2
+            if re.fullmatch(r'(\S\s){3,}\S?.*', raw):          # «P a g e  7» → «Page 7»
+                raw = re.sub(r'(?<=\S) (?=\S)', '', raw)
+            if AR.search(raw):
+                text = line_from_chars([(c.x0, c.x1, c.size, c.get_text()) for c in chars]) or fix_arabic(raw)
+            else:
+                text = re.sub(r'\s+', ' ', raw)
+            out.append({'x0': f['x0'] / W, 'x1': f['x1'] / W, 'y': 1 - f['y1'] / H, 'size': size, 'bold': bold, 'text': text})
+            sizes.append(size)
         out.sort(key=lambda r: (round(r['y'], 3), -r['x1'] if is_arabic(r['text']) else r['x0']))
         real = pages[pno - 1] if pages else pno
         if auto_images and sum(len(r['text']) for r in out) < 60:
@@ -696,11 +774,69 @@ def render_pdf_page(path, page_no, dpi=150):
     if not 1 <= page_no <= doc.pageCount():
         return None
     pt = doc.pagePointSize(page_no - 1)
-    img = doc.render(page_no - 1, QSize(int(pt.width() * dpi / 72), int(pt.height() * dpi / 72)))
+    img = _on_white(doc.render(page_no - 1, QSize(int(pt.width() * dpi / 72), int(pt.height() * dpi / 72))))
     buf = QBuffer()
     buf.open(QIODevice.WriteOnly)
     img.save(buf, 'PNG')
     return bytes(buf.data())
+
+
+def _on_white(img):
+    """A drawn PDF page has a see-through ground; paper is white."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage, QPainter
+    out = QImage(img.size(), QImage.Format_RGB32)
+    out.fill(Qt.white)
+    p = QPainter(out)
+    p.drawImage(0, 0, img)
+    p.end()
+    return out
+
+
+def pdf_page_design(path, page_no, dpi=110):
+    """The design of a PDF page (frames, coloured bands, logos, pictures) without its text: the page is drawn, and
+    every line of text is painted over with the colour around it. Returns (PNG bytes, width, height), or None when the
+    page is plain (almost all white, nothing worth keeping)."""
+    try:
+        from PySide6.QtCore import QBuffer, QIODevice, QRectF, QSize
+        from PySide6.QtGui import QColor, QPainter
+        from PySide6.QtPdf import QPdfDocument
+        from pdfminer.high_level import extract_pages
+        from pdfminer.layout import LAParams, LTTextContainer, LTTextLine
+    except ImportError:
+        return None
+    doc = QPdfDocument()
+    if doc.load(path) != QPdfDocument.Error.None_ or not 1 <= page_no <= doc.pageCount():
+        return None
+    pt = doc.pagePointSize(page_no - 1)
+    k = dpi / 72
+    img = _on_white(doc.render(page_no - 1, QSize(int(pt.width() * k), int(pt.height() * k))))
+    boxes = []
+    for pg in extract_pages(path, page_numbers=[page_no - 1], laparams=LAParams(line_margin=0.4)):
+        sx, sy = img.width() / pg.width, img.height() / pg.height
+        for el in pg:
+            if isinstance(el, LTTextContainer):
+                for ln in el:
+                    if isinstance(ln, LTTextLine) and ln.get_text().strip():
+                        boxes.append(QRectF(ln.x0 * sx - 2, (pg.height - ln.y1) * sy - 2,
+                                            (ln.x1 - ln.x0) * sx + 4, (ln.y1 - ln.y0) * sy + 4))
+    p = QPainter(img)
+    for r in boxes:                              # the colour just outside the line (white, or a coloured band)
+        xs = [int(r.left()) - 2, int(r.right()) + 2]
+        ys = [int(r.top()) - 2, int(r.bottom()) + 2]
+        samples = [img.pixelColor(min(max(x, 0), img.width() - 1), min(max(y, 0), img.height() - 1))
+                   for x in xs for y in ys]
+        samples.sort(key=lambda c: c.lightness())
+        p.fillRect(r, samples[len(samples) // 2])
+    p.end()
+    small = img.scaled(60, 80)
+    white = sum(1 for x in range(small.width()) for y in range(small.height()) if small.pixelColor(x, y).lightness() > 245)
+    if white > small.width() * small.height() * 0.985:
+        return None                                  # a plain white page: no design to keep
+    buf = QBuffer()
+    buf.open(QIODevice.WriteOnly)
+    img.save(buf, 'PNG')
+    return bytes(buf.data()), img.width(), img.height()
 
 
 def import_images(paths):

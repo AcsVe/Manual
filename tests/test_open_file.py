@@ -78,3 +78,50 @@ def test_new_manual_needs_nothing(db, monkeypatch):
     d._ok()
     m = db.manual(d.result_id)
     assert m['title_ar'] == 'دليل جديد' and m['layout']['orientation'] == 'portrait'
+
+
+def _designed_pdf(path):
+    """A cover in one colour, then a page with a coloured band, a frame and text."""
+    w = QPdfWriter(str(path))
+    w.setPageLayout(QPageLayout(QPageSize(QPageSize.A4), QPageLayout.Portrait, QMarginsF(0, 0, 0, 0)))
+    w.setResolution(72)
+    p = QPainter(w)
+    p.fillRect(QRectF(0, 0, 595, 842), QColor('#7A1F2B'))
+    w.newPage()
+    p.fillRect(QRectF(0, 0, 595, 70), QColor('#1B6B3A'))
+    p.drawRect(QRectF(30, 90, 535, 700))
+    from PySide6.QtGui import QFont
+    p.setFont(QFont('DejaVu Sans', 12))
+    for i in range(12):
+        p.drawText(QRectF(50, 120 + i * 24, 495, 20), 0x0002, f'Rule {i + 1} of the school about the matrix')
+    p.end()
+
+
+def test_pdf_opens_with_its_cover_and_page_design(db, tmp_path, quiet):
+    from manual_app.core import backgrounds as BG
+    pdf = tmp_path / 'designed.pdf'
+    _designed_pdf(pdf)
+    ctx = Ctx(db)
+    mid = manuals_mod.open_file(None, ctx, str(pdf))
+    lay = db.manual(mid)['layout']
+    assert BG.active(BG.of_page(lay)) and lay['header']['style'] == 'none' and lay['boxes'] is False
+    secs = db.sections(mid)
+    assert not any(s['kind'] == 'cover' for s in secs)                   # the file's own first page is the cover
+    first = db.blocks(secs[0]['id'])[0]
+    assert first['kind'] == 'image' and first['style'].get('fullpage')
+    from manual_app.core.html import build_html
+    html = build_html(db, mid, 'print')
+    assert 'class="fullimg' in html and 'Rule 3 of the school' in html
+
+
+def test_picture_in_header_and_footer(db, manual):
+    from manual_app.core.html import build_html
+    from manual_app.core.templates import layout_with_defaults
+    aid = db.add_asset('band.png', b'\x89PNG\r\n\x1a\n', 'image/png', 'background', 400, 40)
+    lay = layout_with_defaults(db.manual(manual)['layout'])
+    lay['header'].update(style='image', image_bg={'asset_id': aid, 'fit': 'contain', 'pos': 'right'})
+    lay['footer'].update(style='wave', color1='#1B6B3A', height=12)
+    db.save_manual({'layout': lay}, manual)
+    css = build_html(db, manual, 'print')
+    assert 'top left / 100% 24.0mm' in css or 'top left / 100% 24mm' in css or ') top left / 100%' in css
+    assert ') bottom left / 100% 12.0mm no-repeat' in css                 # the footer shape sits at the bottom

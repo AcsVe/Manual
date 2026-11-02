@@ -356,9 +356,9 @@ class Inspector(QFrame):
             cb.toggled.connect(lambda v, k=key: self.set_layout(lambda l: self._cover_item(l, k).update(hidden=not v)))
             shows.append(cb)
         rows.append((L('يظهر على الغلاف', 'Shown on the cover'), flow_row(shows)))
-        bg = button(L('خلفية الغلاف…', 'Cover background…'), 'image')
+        bg = button(L('استبدال الشكل بصورة…', 'Replace the shape with a picture…'), 'image')
         bg.clicked.connect(self._cover_bg)
-        rows.append((L('الخلفية', 'Background'), bg))
+        rows.insert(2, (None, bg))
         self._form(rows)
         self.body_lay.addWidget(muted(L('اضغط على أي نص في الغلاف لتغيير كتابته أو لونه أو حجمه.',
                                         'Click any text on the cover to change its wording, colour or size.')))
@@ -367,58 +367,71 @@ class Inspector(QFrame):
         from ..core import backgrounds as BG
         from .background import edit_background
         lay = self.lay()
-        ok, bg = edit_background(self, self.db, BG.of_cover(lay), L('خلفية الغلاف', 'Cover background'), False,
+        ok, bg = edit_background(self, self.db, BG.of_cover(lay) or {'opacity': 1.0, 'fit': 'cover'},
+                                 L('صورة الغلاف', 'Cover picture'), False,
                                  lay['orientation'] == 'landscape')
         if ok:
             self.set_layout(lambda l: (l['cover'].update(bg=bg, bg_id=None)))
 
     # ── header and footer ────────────────────────────────────────────
     def _margin(self, which, first='', last=''):
+        """The header or the footer: the same settings for both."""
         lay = self.lay()
-        if which == 'footer':
-            self._head(L('التذييل', 'Footer'))
-            ft = lay['footer']
-            style = QComboBox()
-            style.addItem(L('خط فاصل', 'Separator line'), 'line')
-            style.addItem(L('بدون', 'None'), 'none')
-            style.setCurrentIndex(max(0, style.findData(ft.get('style', 'line'))))
-            fit(style, 160)
-            style.currentIndexChanged.connect(lambda: self.set_layout(lambda l: l['footer'].update(style=style.currentData())))
-            rows = [(L('الشكل', 'Style'), style),
-                    (L('لون النص', 'Text colour'), self._color_row(L('لون نص التذييل', 'Footer text colour'), ft.get('text_color'),
-                                                                   lambda v: self.set_layout(lambda l: l['footer'].update(text_color=v))))]
-            rows += self._texts('footer', ft)
-            self._form(rows)
-            return
-        self._head(L('الترويسة', 'Header'))
-        hd = lay['header']
+        part = lay[which]
+        header = which == 'header'
+        name = L('الترويسة', 'Header') if header else L('التذييل', 'Footer')
+        self._head(name)
+        default_h = 22 if header else 14
         style = QComboBox()
         for k, (ar, en) in HEADER_STYLES.items():
-            style.addItem(L(ar, en), k)
-        style.setCurrentIndex(max(0, style.findData(hd.get('style', 'wave'))))
+            label = (L('صورة', 'Picture') if k == 'image' else
+                     L('خط فاصل', 'Separator line') if (k == 'line' and not header) else L(ar, en))
+            style.addItem(label, k)
+        style.setCurrentIndex(max(0, style.findData(part.get('style', 'wave' if header else 'line'))))
         fit(style, 160)
-        style.currentIndexChanged.connect(lambda: self.set_layout(lambda l: l['header'].update(style=style.currentData())))
+        style.currentIndexChanged.connect(lambda: self.set_layout(lambda l: l[which].update(style=style.currentData())))
         drop = button(L('إزالة الشكل الملوّن من كل الصفحات', 'Remove the coloured shape from every page'), 'trash', 'danger')
         drop.clicked.connect(lambda: style.setCurrentIndex(style.findData('none')))
+        picture = button(L('استبدال الشكل بصورة…', 'Replace the shape with a picture…'), 'image')
+        picture.clicked.connect(lambda: self._band_picture(which, name))
         height = QSpinBox()
-        height.setRange(8, 60)
+        height.setRange(6, 80)
         height.setSuffix(L(' مم', ' mm'))
-        height.setValue(int(hd.get('height') or 22))
+        height.setValue(int(part.get('height') or default_h))
         fit(height, 100)
-        height.editingFinished.connect(lambda: self.set_layout(lambda l: l['header'].update(height=height.value())))
-        logo = QCheckBox(L('الشعار في الترويسة', 'Logo in the header'))
-        logo.setChecked(bool(hd.get('logo')))
-        logo.toggled.connect(lambda v: self.set_layout(lambda l: l['header'].update(logo=v)))
-        rows = [(L('الشكل', 'Style'), style), (None, drop)] + self._page_shape_rows(first, last) + [(L('الارتفاع', 'Height'), height),
-                (L('لون الشكل', 'Shape colour'), self._color_row(L('لون الترويسة', 'Header colour'), hd.get('color1'),
-                                                                 lambda v: self.set_layout(lambda l: l['header'].update(color1=v)))),
-                (L('اللون الثاني', 'Second colour'), self._color_row(L('اللون الثاني', 'Second colour'), hd.get('color2'),
-                                                                     lambda v: self.set_layout(lambda l: l['header'].update(color2=v)))),
-                (L('لون النص', 'Text colour'), self._color_row(L('لون نص الترويسة', 'Header text colour'), hd.get('text_color'),
-                                                               lambda v: self.set_layout(lambda l: l['header'].update(text_color=v)))),
-                (None, logo)]
-        rows += self._texts('header', hd)
+        height.editingFinished.connect(lambda: self.set_layout(lambda l: l[which].update(height=height.value())))
+        rows = [(L('الشكل', 'Style'), style), (None, flow_row([picture, drop]))]
+        if header:
+            rows += self._page_shape_rows(first, last)
+        rows += [(L('الارتفاع', 'Height'), height),
+                 (L('لون الشكل', 'Shape colour'), self._color_row(L('لون الشكل', 'Shape colour'), part.get('color1'),
+                                                                  lambda v: self.set_layout(lambda l: l[which].update(color1=v)))),
+                 (L('اللون الثاني', 'Second colour'), self._color_row(L('اللون الثاني', 'Second colour'), part.get('color2'),
+                                                                      lambda v: self.set_layout(lambda l: l[which].update(color2=v)))),
+                 (L('لون النص', 'Text colour'), self._color_row(L('لون النص', 'Text colour'), part.get('text_color'),
+                                                                lambda v: self.set_layout(lambda l: l[which].update(text_color=v))))]
+        if header:
+            logo = QCheckBox(L('الشعار في الترويسة', 'Logo in the header'))
+            logo.setChecked(bool(part.get('logo')))
+            logo.toggled.connect(lambda v: self.set_layout(lambda l: l['header'].update(logo=v)))
+            rows.append((None, logo))
+        rows += self._texts(which, part)
         self._form(rows)
+
+    def _band_picture(self, which, name):
+        """A picture in place of the header or footer shape, placed as wished (fit, position, size, turning, strength)."""
+        from .background import edit_background
+        part = self.lay()[which]
+        current = part.get('image_bg') or ({'asset_id': part.get('image_id'), 'fit': 'stretch'} if part.get('image_id') else
+                                           {'opacity': 1.0, 'fit': 'contain', 'pos': 'center'})
+        ok, bg = edit_background(self, self.db, current, L('صورة ', 'Picture of the ') + name, False, False)
+        if not ok:
+            return
+        if bg:
+            self.set_layout(lambda l: l[which].update(style='image', image_bg=bg, image_id=None))
+        else:
+            self.set_layout(lambda l: l[which].update(style='none', image_bg=None, image_id=None))
+        self.show_for(self.current)
 
     def _texts(self, which, data):
         out = []

@@ -191,7 +191,9 @@ class PdfJob(QObject):
     def start(self):
         self.view.show()
         self._deadline.start()
-        self.view.load(QUrl.fromLocalFile(self.html_path))
+        url = QUrl.fromLocalFile(self.html_path)
+        url.setQuery(f'v={os.path.getmtime(self.html_path):.6f}')     # never an old copy of the same file name
+        self.view.load(url)
 
     def _loaded(self, ok):
         if not ok:

@@ -155,7 +155,7 @@ FILE_FILTER = ('ملفات مدعومة / Supported files (*.docx *.pdf *.html *
                'Word (*.docx);;PDF (*.pdf);;HTML (*.html *.htm);;Text (*.txt);;Pictures (*.png *.jpg *.jpeg *.bmp *.gif *.webp)')
 
 
-def _bring_in(parent, ctx, mid, parent_sid, path, kind='text', pages=None, image_pages=()):
+def _bring_in(parent, ctx, mid, parent_sid, path, kind='text', pages=None, image_pages=()):  # noqa: PLR0913
     """Reads ``path`` into manual ``mid`` (under ``parent_sid``), tidies it with the checker's safe fixes and returns
     (section ids, the summary text, the points left) — or None after telling what went wrong."""
     QGuiApplication.setOverrideCursor(Qt.WaitCursor)
@@ -217,6 +217,33 @@ def import_into(parent, ctx, mid, parent_sid):
     return True
 
 
+def keep_pdf_look(db, mid, path):
+    """A PDF keeps its look: its first page comes in as the cover (a whole page, as it is), and the design of its
+    pages (frames, coloured bands, logos), without their text, becomes the background of every page; the program's
+    own header shape and footer line are then left out, so the two do not overlap. Returns the pages to bring in as
+    pictures."""
+    n = importer.pdf_page_count(path)
+    if n < 2:
+        return ()
+    QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+    try:
+        design = importer.pdf_page_design(path, 2)
+    finally:
+        QGuiApplication.restoreOverrideCursor()
+    if design:
+        data, w, h = design
+        aid = db.add_asset(L('تصميم صفحات الملف الأصلي', 'Design of the original pages') + '.png', data, 'image/png',
+                           'background', w, h)
+        from ..core.templates import layout_with_defaults
+        lay = layout_with_defaults(db.manual(mid)['layout'])
+        lay['page_bg'] = {'asset_id': aid, 'fit': 'stretch', 'layer': 'behind', 'opacity': 1.0}
+        lay['header'] = dict(lay['header'], style='none', logo=False)
+        lay['footer'] = dict(lay['footer'], style='none')
+        lay['boxes'] = False             # the original pages have their own frames
+        db.save_manual({'layout': lay}, mid)
+    return {1}
+
+
 def open_file(parent, ctx, path=None):
     """Opens any supported file as a new manual at once, with no questions: the title is the file name, the page
     direction follows the file, the rest takes the usual settings (all changeable later). Returns the new manual."""
@@ -233,10 +260,15 @@ def open_file(parent, ctx, path=None):
               'org_ar': ctx.db.get('org_ar') or '', 'org_en': ctx.db.get('org_en') or '',
               'issue_date': __import__('datetime').date.today().isoformat()}
     mid = create_from_starter(ctx.db, 'blank', fields)
-    done = _bring_in(parent, ctx, mid, None, path)
+    image_pages = ()
+    if os.path.splitext(path)[1].lower() == '.pdf':
+        image_pages = keep_pdf_look(ctx.db, mid, path)
+    done = _bring_in(parent, ctx, mid, None, path, image_pages=image_pages)
     if not done:
         ctx.db.delete_manual(mid)
         return None
+    if image_pages:                     # the file's own first page is the cover: the ready-made one goes
+        ctx.db.delete_sections([s['id'] for s in ctx.db.sections(mid) if s['kind'] == 'cover'])
     ctx.manual_id = mid
     if ctx.window:
         ctx.window.open_editor()
