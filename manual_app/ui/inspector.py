@@ -18,6 +18,8 @@ COVER_PARTS = {'title': (('عنوان الدليل', 'Manual title'), ('title_ar
                'subtitle': (('العنوان الفرعي', 'Subtitle'), ('subtitle_ar', 'subtitle_en'), 15),
                'org': (('اسم المؤسسة', 'Organisation'), ('org_ar', 'org_en'), 14),
                'edition': (('النسخة', 'Edition'), ('edition_ar', 'edition_en'), 12)}
+HEADS = {'': ('دون تغيير', 'No change'), 'plain': ('دون الشكل الملوّن', 'Without the coloured shape'),
+         'shape': ('بالشكل الملوّن', 'With the coloured shape')}
 ORIENTS = {'': ('دون تغيير', 'No change'), 'portrait': ('عمودي', 'Portrait'), 'landscape': ('أفقي', 'Landscape'),
            'section': ('كاتجاه القسم', 'As the section')}
 
@@ -184,7 +186,7 @@ class Inspector(QFrame):
             elif kind == 'c' and parts[1] == 'shape' or what == 'p cover':
                 self._cover()
             elif kind == 'm':
-                self._margin(parts[1])
+                self._margin(parts[1], parts[2] if len(parts) > 2 else '', parts[3] if len(parts) > 3 else '')
             elif kind == 'b':
                 sid, i = parts[1].split(':')
                 self._block(int(sid), int(i))
@@ -331,7 +333,7 @@ class Inspector(QFrame):
             self.set_layout(lambda l: (l['cover'].update(bg=bg, bg_id=None)))
 
     # ── header and footer ────────────────────────────────────────────
-    def _margin(self, which):
+    def _margin(self, which, first='', last=''):
         lay = self.lay()
         if which == 'footer':
             self._head(L('التذييل', 'Footer'))
@@ -356,7 +358,7 @@ class Inspector(QFrame):
         style.setCurrentIndex(max(0, style.findData(hd.get('style', 'wave'))))
         fit(style, 160)
         style.currentIndexChanged.connect(lambda: self.set_layout(lambda l: l['header'].update(style=style.currentData())))
-        drop = button(L('إزالة الشكل الملوّن', 'Remove the coloured shape'), 'trash', 'danger')
+        drop = button(L('إزالة الشكل الملوّن من كل الصفحات', 'Remove the coloured shape from every page'), 'trash', 'danger')
         drop.clicked.connect(lambda: style.setCurrentIndex(style.findData('none')))
         height = QSpinBox()
         height.setRange(8, 60)
@@ -367,7 +369,7 @@ class Inspector(QFrame):
         logo = QCheckBox(L('الشعار في الترويسة', 'Logo in the header'))
         logo.setChecked(bool(hd.get('logo')))
         logo.toggled.connect(lambda v: self.set_layout(lambda l: l['header'].update(logo=v)))
-        rows = [(L('الشكل', 'Style'), style), (None, drop), (L('الارتفاع', 'Height'), height),
+        rows = [(L('الشكل', 'Style'), style), (None, drop)] + self._page_shape_rows(first, last) + [(L('الارتفاع', 'Height'), height),
                 (L('لون الشكل', 'Shape colour'), self._color_row(L('لون الترويسة', 'Header colour'), hd.get('color1'),
                                                                  lambda v: self.set_layout(lambda l: l['header'].update(color1=v)))),
                 (L('اللون الثاني', 'Second colour'), self._color_row(L('اللون الثاني', 'Second colour'), hd.get('color2'),
@@ -444,6 +446,13 @@ class Inspector(QFrame):
             fit(o, 160)
             o.currentIndexChanged.connect(lambda: set_style(orient=o.currentData() or None))
             rows.append((L('اتجاه الصفحات بعده', 'Direction of the pages after it'), o))
+            hd = QComboBox()
+            for k, (ar, en) in HEADS.items():
+                hd.addItem(L(ar, en), k)
+            hd.setCurrentIndex(max(0, hd.findData(st.get('head', ''))))
+            fit(hd, 200)
+            hd.currentIndexChanged.connect(lambda: set_style(head=hd.currentData() or None))
+            rows.append((L('ترويسة الصفحات بعده', 'Header of the pages after it'), hd))
         else:
             o = QComboBox()
             for k, (ar, en) in ORIENTS.items():
@@ -459,28 +468,46 @@ class Inspector(QFrame):
         rows.append((None, flow_row([edit, dele])))
         self._form(rows)
 
-    def turn_from(self, sid, first, orient, last_sid_i):
-        """Pages turned from block ``first`` of section ``sid``: a page break asking for ``orient`` goes before it
-        (or the page break already there is changed); with ``last_sid_i`` (the last block of the page) a page break
-        back to the section's direction goes after that block, so only that page is turned."""
+    def set_pages(self, sid, first, last_sid_i, key, value, back):
+        """From block ``first`` of section ``sid`` the pages take ``key``=``value`` (a page break carrying it goes
+        before that block, or the one already there takes it). With ``last_sid_i`` (the last block of the page) a page
+        break carrying ``back`` goes after that block, so only that page changes."""
         def fn(bl):
-            end = None
             if last_sid_i:
                 ls, li = last_sid_i
-                if ls == sid and li + 1 < len(bl):
+                if ls == sid and first <= li and li + 1 < len(bl):
                     end = li + 1
-            if end is not None:
-                if bl[end]['kind'] == 'pagebreak':
-                    bl[end]['style'] = dict(bl[end].get('style') or {}, orient='section')
-                else:
-                    bl.insert(end, {'kind': 'pagebreak', 'ar': '', 'en': '', 'data': {}, 'style': {'orient': 'section'}})
+                    if bl[end]['kind'] == 'pagebreak':
+                        bl[end]['style'] = dict(bl[end].get('style') or {}, **{key: back})
+                    else:
+                        bl.insert(end, {'kind': 'pagebreak', 'ar': '', 'en': '', 'data': {}, 'style': {key: back}})
             if first > 0 and bl[first - 1]['kind'] == 'pagebreak':
-                bl[first - 1]['style'] = dict(bl[first - 1].get('style') or {}, orient=orient)
+                bl[first - 1]['style'] = dict(bl[first - 1].get('style') or {}, **{key: value})
             elif bl[first]['kind'] == 'pagebreak':
-                bl[first]['style'] = dict(bl[first].get('style') or {}, orient=orient)
+                bl[first]['style'] = dict(bl[first].get('style') or {}, **{key: value})
             else:
-                bl.insert(first, {'kind': 'pagebreak', 'ar': '', 'en': '', 'data': {}, 'style': {'orient': orient}})
+                bl.insert(first, {'kind': 'pagebreak', 'ar': '', 'en': '', 'data': {}, 'style': {key: value}})
         self.set_blocks(sid, fn)
+
+    def turn_from(self, sid, first, orient, last_sid_i):
+        self.set_pages(sid, first, last_sid_i, 'orient', orient, 'section')
+
+    def shape_from(self, sid, first, plain, last_sid_i):
+        self.set_pages(sid, first, last_sid_i, 'head', 'plain' if plain else 'shape', 'shape' if plain else 'plain')
+
+    def _page_shape_rows(self, first, last):
+        """Buttons for the header's coloured shape on the clicked page only, or from it on."""
+        if not first:
+            return []
+        fs, fi = (int(x) for x in first.split(':'))
+        ls_li = tuple(int(x) for x in last.split(':')) if last else None
+        only = button(L('إزالة الشكل من هذه الصفحة فقط', 'Remove the shape from this page only'), 'close', 'danger')
+        only.clicked.connect(lambda: self.shape_from(fs, fi, True, ls_li))
+        on = button(L('إزالته من هذه الصفحة إلى نهاية القسم', 'Remove it from this page to the end of the section'), 'down')
+        on.clicked.connect(lambda: self.shape_from(fs, fi, True, None))
+        back = button(L('إعادة الشكل من هذه الصفحة', 'Bring the shape back from this page'), 'reset')
+        back.clicked.connect(lambda: self.shape_from(fs, fi, False, None))
+        return [(L('الشكل في صفحات بعينها', 'The shape on some pages'), flow_row([only, on, back]))]
 
     def _page(self, first, last):
         self._head(L('هذه الصفحة', 'This page'))
@@ -497,7 +524,8 @@ class Inspector(QFrame):
         only.clicked.connect(lambda: self.turn_from(fs, fi, o.currentData(), ls_li))
         on = button(L('من هذه الصفحة إلى نهاية القسم', 'From this page to the end of the section'), 'down')
         on.clicked.connect(lambda: self.turn_from(fs, fi, o.currentData(), None))
-        self._form([(L('اتجاه الصفحة', 'Page direction'), o), (None, flow_row([only, on]))])
+        self._form([(L('اتجاه الصفحة', 'Page direction'), o), (None, flow_row([only, on]))]
+                   + self._page_shape_rows(first, last))
         self.body_lay.addWidget(muted(L('تُعاد صفحات هذا الجزء بالاتجاه المختار، وقد تتغير كمية النص في كل صفحة تبعاً لذلك.',
                                         'The pages of this part are laid out again in the chosen direction, so the amount of text on each may change.')))
 

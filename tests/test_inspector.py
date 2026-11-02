@@ -68,3 +68,19 @@ def test_one_page_turned_and_block_look(win, db, manual):
     insp.set_blocks(v['id'], lambda bl: bl[0].update(style={'color': '#B42318', 'size': 120}))
     assert 'style="color:#B42318;font-size:120%;"' in build_html(db, manual, 'print')
     assert win.editor.sid == v['id']                                          # the editor follows the click
+
+
+def test_shape_removed_from_one_page_only(win, db, manual):
+    v = _vision(db, manual)
+    db.replace_blocks(v['id'], [{'kind': 'paragraph', 'ar': f'فقرة {i}', 'en': f'para {i}'} for i in range(4)])
+    insp = win.editor.preview.inspector
+    insp.show_for(f'm header {v["id"]}:1 {v["id"]}:1')
+    assert any('هذه الصفحة فقط' in b.text() for b in insp.findChildren(type(insp.undo_btn)))
+    insp.shape_from(v['id'], 1, True, (v['id'], 1))
+    heads = [(b['kind'], (b.get('style') or {}).get('head')) for b in db.blocks(v['id'])]
+    assert heads == [('paragraph', None), ('pagebreak', 'plain'), ('paragraph', None), ('pagebreak', 'shape'),
+                     ('paragraph', None), ('paragraph', None)]
+    html = build_html(db, manual, 'print')
+    assert 'class="pgoNp"' in html and '@page oriNp{' in html
+    page_rule = html[html.index('@page oriNp{'):][:300]
+    assert 'background:none' in page_rule or 'background:url' in page_rule      # no wave on that page

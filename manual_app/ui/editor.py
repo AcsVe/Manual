@@ -628,7 +628,7 @@ class BlockWidget(QFrame):
         self._clear()
         k = self.block.get('kind', 'paragraph')
         d = self.block.get('data') or {}
-        self.ar = self.en = self.table = self.links = self.orient = None
+        self.ar = self.en = self.table = self.links = self.orient = self.head = None
         if k in TEXT_KINDS:
             (par, pen) = PLACEHOLDERS[k]
             self.ar = RichEdit(True, L(*par))
@@ -699,7 +699,13 @@ class BlockWidget(QFrame):
             self.body.addWidget(flow_row([self.thumb, pick, from_pdf, drop]))
             self.body.addLayout(g)
         elif k == 'pagebreak':
-            from .inspector import ORIENTS
+            from .inspector import HEADS, ORIENTS
+            self.head = QComboBox()
+            for key, (ar, en) in HEADS.items():
+                self.head.addItem(L(ar, en), key)
+            self.head.setCurrentIndex(max(0, self.head.findData((self.block.get('style') or {}).get('head', ''))))
+            self.head.currentIndexChanged.connect(self.changed.emit)
+            fit(self.head, 200)
             self.orient = QComboBox()
             for key, (ar, en) in ORIENTS.items():
                 self.orient.addItem(L(ar, en), key)
@@ -708,9 +714,12 @@ class BlockWidget(QFrame):
             fit(self.orient, 160)
             g = form_grid()
             field(g, 0, 0, L('اتجاه الصفحات بعده', 'Direction of the pages after it'), self.orient)
+            field(g, 1, 0, L('ترويسة الصفحات بعده', 'Header of the pages after it'), self.head)
             g.setColumnStretch(2, 1)
-            self.body.addWidget(muted(L('تبدأ الكتلة التالية في صفحة جديدة. اختر «أفقي» أو «عمودي» لتغيير اتجاه الصفحات التالية حتى الفاصل القادم.',
-                                        'The next block starts on a new page. Choose «Landscape» or «Portrait» to turn the next pages, up to the next break.')))
+            note = muted(L('تبدأ الكتلة التالية في صفحة جديدة. الاتجاه والترويسة المختاران هنا يسريان على الصفحات التالية حتى الفاصل القادم.',
+                           'The next block starts on a new page. The direction and header chosen here apply to the next pages, up to the next break.'))
+            note.setWordWrap(True)
+            self.body.addWidget(note)
             self.body.addLayout(g)
         self.align.setVisible(k in TEXT_KINDS or k == 'image')
         size_tree(self)
@@ -778,10 +787,11 @@ class BlockWidget(QFrame):
         if k == 'image':
             style['fullpage'] = self.fullpage.isChecked()
         if k == 'pagebreak' and getattr(self, 'orient', None) is not None:
-            if self.orient.currentData():
-                style['orient'] = self.orient.currentData()
-            else:
-                style.pop('orient', None)
+            for key, combo in (('orient', self.orient), ('head', self.head)):
+                if combo.currentData():
+                    style[key] = combo.currentData()
+                else:
+                    style.pop(key, None)
         out = {'kind': k, 'ar': '', 'en': '', 'data': {}, 'style': style}
         if self.ar is not None:
             out['ar'], out['en'] = self.ar.value(), self.en.value()
@@ -1055,15 +1065,16 @@ PICK_JS = r"""
 var st=document.createElement('style');st.textContent='[data-b]:hover,[data-cv]:hover,[data-sid]:hover>.frame{outline:2px dashed #0C67EC;outline-offset:1px;cursor:pointer}'
  +'.pagedjs_margin:hover{outline:2px dashed #F28C28;cursor:pointer} .mb-picked{outline:2px solid #F28C28 !important;outline-offset:1px}';
 document.head.appendChild(st);
+function span(p){var bs=p?p.querySelectorAll('[data-b]'):[];return bs.length?' '+bs[0].getAttribute('data-b')+' '+bs[bs.length-1].getAttribute('data-b'):'';}
 function mark(el){document.querySelectorAll('.mb-picked').forEach(function(x){x.classList.remove('mb-picked')});if(el)el.classList.add('mb-picked');}
 document.addEventListener('click',function(e){var t=e.target,side=t.closest('.en')?'en':'ar';
  var c=t.closest('[data-cv]');if(c){mark(c);console.log('MBPICK c '+c.getAttribute('data-cv'));return;}
  if(t.closest('.cover')){mark(t.closest('.cover'));console.log('MBPICK p cover');return;}
  var b=t.closest('[data-b]');if(b){mark(b);console.log('MBPICK b '+b.getAttribute('data-b')+' '+side);return;}
- var m=t.closest('.pagedjs_margin');if(m){mark(m);console.log('MBPICK m '+(m.className.indexOf('bottom')>=0?'footer':'header'));return;}
+ var m=t.closest('.pagedjs_margin');if(m){mark(m);console.log('MBPICK m '+(m.className.indexOf('bottom')>=0?'footer':'header')+span(t.closest('.pagedjs_page')));return;}
  var p=t.closest('.pagedjs_page');
  if(p){var bs=p.querySelectorAll('[data-b]');mark(p.querySelector('.pagedjs_pagebox'));
-  if(e.clientY<p.querySelector('.pagedjs_area').getBoundingClientRect().top){console.log('MBPICK m header');return;}
+  if(e.clientY<p.querySelector('.pagedjs_area').getBoundingClientRect().top){console.log('MBPICK m header'+span(p));return;}
   console.log('MBPICK p page '+(bs.length?bs[0].getAttribute('data-b'):'')+' '+(bs.length?bs[bs.length-1].getAttribute('data-b'):''));return;}
 },true);})();
 """
@@ -1109,7 +1120,7 @@ class Preview(QWidget):
         self.lay.addLayout(top)
         from .inspector import Inspector
         self.inspector = Inspector(ctx)
-        self.inspector.setMaximumHeight(420)
+        self.inspector.setMaximumHeight(340)
         self.lay.addWidget(self.inspector)
         self.holder = QLabel(L('تظهر هنا صفحات الدليل كما ستُطبع. اضغط على أي جزء منها لتغييره.',
                                'The manual pages show here as they will print. Click any part to change it.'))

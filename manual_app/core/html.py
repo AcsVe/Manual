@@ -379,6 +379,7 @@ class Renderer:
         if header_bg:
             layers.append(header_bg)
         head_layers = list(layers)        # logo and header drawing: on every page, also those with their own background
+        logo_layers = [x for x in layers if x != header_bg]
         pbg = BG.of_page(lay)
         front_css = []
         if BG.active(pbg) and pbg['layer'] == 'behind':
@@ -433,8 +434,17 @@ class Renderer:
                     '--pagedjs-height-left:%smm;--pagedjs-height-right:%smm}' % (name, ph, pw, ph, pw, ph, ph, pw, pw))
         front_css.append(turned('fullL'))
         front_css.append(turned('oriT'))
+        # pages without the header's coloured shape: the page background stays, the header text takes a colour
+        # that reads on white
+        plain_layers = logo_layers + ([self.bg_css(pbg)] if BG.active(pbg) and pbg['layer'] == 'behind' else [])
+        plain_bg = 'background:' + (', '.join(plain_layers) or 'none') + ';'
+        plain_col = _hex(hd.get('text_color')) if hs not in ('wave', 'band') else None
+        plain_col = plain_col or c['primary']
+        plain_boxes = ''.join(f'@{pos}{{color:{plain_col}}}' for pos in ('top-left', 'top-center', 'top-right'))
+        front_css.append(turned('oriTp'))
         named_runs = (f'@page oriT{{size:{ph}mm {pw}mm}} @page oriN{{size:{pw}mm {ph}mm}} '
-                      '.pgoT{page:oriT} .pgoN{page:oriN}')
+                      f'@page oriTp{{size:{ph}mm {pw}mm;{plain_bg}{plain_boxes}}} @page oriNp{{size:{pw}mm {ph}mm;{plain_bg}{plain_boxes}}} '
+                      '.pgoT{page:oriT} .pgoN{page:oriN} .pgoTp{page:oriTp} .pgoNp{page:oriNp}')
         AL = {'justify': ('justify', 'justify'), 'start': ('right', 'left'), 'center': ('center', 'center')}.get(
             lay.get('align', 'justify'), ('justify', 'justify'))
         named = []
@@ -896,23 +906,35 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         return self.blocks_html(s)
 
     # ── blocks ───────────────────────────────────────────────────────
-    def run_of(self, b, current):
-        """The page direction a page break asks for: 'T' (turned from the manual), 'N' (the manual's), or the
-        current one when it asks for none."""
-        o = (b.get('style') or {}).get('orient')
-        if b['kind'] != 'pagebreak' or o not in ('portrait', 'landscape', 'section'):
+    def run_of(self, b, current, base='N'):
+        """What a page break asks of the pages after it: their direction and whether the header keeps its coloured
+        shape. The answer names the page they go on: 'T'/'N' (turned from the manual / the manual's direction) and
+        'p' for pages without the shape; None for the section's own pages. ``base``: the section's direction."""
+        st = b.get('style') or {}
+        o, head = st.get('orient'), st.get('head')
+        if b['kind'] != 'pagebreak' or (o not in ('portrait', 'landscape', 'section') and head not in ('plain', 'shape')):
             return current
+        cur_o = (current or '').rstrip('p')
+        plain = bool(current and current.endswith('p'))
         if o == 'section':
-            return None
-        return 'N' if o == self.lay['orientation'] else 'T'
+            cur_o = ''
+        elif o in ('portrait', 'landscape'):
+            cur_o = 'N' if o == self.lay['orientation'] else 'T'
+        if head in ('plain', 'shape'):
+            plain = head == 'plain'
+        if plain:
+            return (cur_o or base) + 'p'
+        return cur_o or None
 
     def blocks_html(self, s):
-        pieces = []                      # (html, kind of block, page direction of its run)
+        pieces = []                      # (html, kind of block, the named page of its run)
         run = None
+        so = (s.get('style') or {}).get('orientation')
+        base = 'T' if so in ('portrait', 'landscape') and so != self.lay['orientation'] else 'N'
         for i, b in enumerate(self.db.blocks(s['id'])):
             self._bref = f'{s["id"]}:{i}'
             if self.mode == 'print':
-                run = self.run_of(b, run)
+                run = self.run_of(b, run, base)
             h = self.block(b)
             if not h:
                 continue
