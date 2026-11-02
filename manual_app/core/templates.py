@@ -8,7 +8,7 @@ DEFAULT_LAYOUT = {
     'fonts': {'ar': 'Tajawal', 'en': 'Tajawal', 'size': 10.5, 'line': 1.45},
     'colors': {'primary': '#0B3D91', 'secondary': '#1F6FD1', 'accent': '#F28C28', 'text': '#1E293B',
                'heading': '#0B3D91', 'table_head': '#0B3D91', 'table_head_text': '#FFFFFF', 'box_border': '#9FB3D1',
-               'callout': '#FFF4E0'},
+               'callout': '#FFF4E0', 'table_stripe': '#F6F9FD', 'table_border': '#9FB3D1', 'table_text': '#1E293B'},
     'header': {'style': 'wave', 'height': 24, 'logo': True, 'start': '', 'center': '', 'end': '{title}',
                'image_id': None},
     'footer': {'style': 'line', 'start': '{issue_label} {issue_date}', 'center': '', 'end': '{page_label} {page} | {pages}'},
@@ -28,6 +28,18 @@ DEFAULT_LAYOUT = {
     'page_numbers': {'digits': 'latin', 'front': 'same', 'start': 1, 'count_cover': True},
 }
 FRONT_KINDS = ('cover', 'disclaimer', 'doc_control', 'toc')
+# the colours a single table may have of its own (the rest of the manual keeps the design colours)
+TABLE_COLORS = {'head': ('table_head', ('رأس الجدول', 'Header row')), 'head_text': ('table_head_text', ('نص الرأس', 'Header text')),
+                'stripe': ('table_stripe', ('الأسطر المتناوبة', 'Alternate rows')), 'border': ('table_border', ('الحدود', 'Borders')),
+                'text': ('table_text', ('نص الخلايا', 'Cell text'))}
+TABLE_THEMES = {
+    'blue': (('أزرق', 'Blue'), {'head': '#0B3D91', 'head_text': '#FFFFFF', 'stripe': '#F6F9FD', 'border': '#9FB3D1', 'text': '#1E293B'}),
+    'green': (('أخضر', 'Green'), {'head': '#1B6B3A', 'head_text': '#FFFFFF', 'stripe': '#F2F8F4', 'border': '#A7C9B2', 'text': '#1E293B'}),
+    'grey': (('رمادي', 'Grey'), {'head': '#475569', 'head_text': '#FFFFFF', 'stripe': '#F4F6F8', 'border': '#B8C2CE', 'text': '#1E293B'}),
+    'gold': (('ذهبي', 'Gold'), {'head': '#9A6B00', 'head_text': '#FFFFFF', 'stripe': '#FBF6EA', 'border': '#D9C38F', 'text': '#1E293B'}),
+    'red': (('عنابي', 'Burgundy'), {'head': '#7A1F2B', 'head_text': '#FFFFFF', 'stripe': '#FAF1F2', 'border': '#D4A7AD', 'text': '#1E293B'}),
+    'plain': (('بسيط دون تلوين', 'Plain'), {'head': '#FFFFFF', 'head_text': '#1E293B', 'stripe': '#FFFFFF', 'border': '#94A3B8', 'text': '#1E293B'}),
+}
 ALIGNMENTS = {'justify': ('ضبط الطرفين', 'Justified'), 'start': ('من بداية السطر (يمين العربية ويسار الإنجليزية)', 'From the line start (right in Arabic, left in English)'),
               'center': ('توسيط', 'Centred')}
 BLOCK_ALIGN = {'': ('كإعداد الدليل', 'As the manual'), 'right': ('يمين', 'Right'), 'center': ('وسط', 'Centre'),

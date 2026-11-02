@@ -475,6 +475,15 @@ class MainWindow(QMainWindow):
         if run:
             self.doctor.run()
 
+    def open_design(self, tab='page'):
+        self.show_page(self.design)
+        self.design.open_tab(tab)
+
+    def open_in_editor(self, what):
+        """A click on the design preview: the block or section opens in the editor."""
+        self.show_page(self.editor)
+        self.editor.picked(what)
+
     def open_editor(self):
         self.manual_changed()
         self.show_page(self.editor)

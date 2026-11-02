@@ -6,14 +6,14 @@ import os
 from PySide6.QtCore import QDate, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDateEdit, QDialogButtonBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
-                               QInputDialog, QLabel, QLineEdit, QMenu, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
+                               QInputDialog, QLabel, QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
                                QTableWidget, QTableWidgetItem, QTextEdit, QToolButton, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
 from ..core.db import BLOCK_KINDS, SECTION_KINDS, STATUSES
 from ..core.richtext import clean
 from ..core import backgrounds as BG, doctor
-from ..core.templates import BLOCK_ALIGN, TABLE_PRESETS, layout_with_defaults, policy_blocks, table_data
+from ..core.templates import BLOCK_ALIGN, TABLE_COLORS, TABLE_PRESETS, TABLE_THEMES, layout_with_defaults, policy_blocks, table_data
 from .common import L, confirm, error, info
 from .library import asset_pixmap, pick_asset
 from .theme import SizedDialog, a11y, size_tree, button, card, field, fit, form_grid, hint, icon, flow_row, icon_button, ltr, muted, name_buttons
@@ -257,9 +257,92 @@ class ColumnsDialog(SizedDialog):
         return out
 
 
+class TableColorsDialog(SizedDialog):
+    """The colours of a table: a ready set or each colour by itself, for this table only or every table."""
+
+    def __init__(self, parent, own, design):
+        super().__init__(parent)
+        self.setWindowTitle(L('ألوان الجدول', 'Table colours'))
+        self.design = design                      # the manual's colours, keyed like TABLE_COLORS
+        self.values = dict(design, **{k: v for k, v in (own or {}).items() if v})
+        self.theme = QComboBox()
+        self.theme.addItem(L('اختيار مجموعة جاهزة…', 'Choose a ready set…'), '')
+        self.theme.addItem(L('ألوان الدليل (من التصميم)', 'The manual colours (from the design)'), 'design')
+        for k, ((ar, en), _v) in TABLE_THEMES.items():
+            self.theme.addItem(L(ar, en), k)
+        self.theme.activated.connect(self._theme)
+        fit(self.theme, 280)
+        self.buttons = {}
+        g = form_grid()
+        field(g, 0, 0, L('مجموعة ألوان', 'Colour set'), self.theme)
+        for i, (k, (_dk, (ar, en))) in enumerate(TABLE_COLORS.items(), 1):
+            b = ltr(QPushButton(), 120)
+            b.clicked.connect(lambda _=False, kk=k: self._pick(kk))
+            self.buttons[k] = b
+            field(g, i, 0, L(ar, en), b)
+        self.sample = QLabel()
+        self.sample.setMinimumHeight(90)
+        self.sample.setAlignment(Qt.AlignLeading | Qt.AlignVCenter)
+        a11y(self.sample, L('شكل الجدول بهذه الألوان', 'The table in these colours'))
+        g.addWidget(self.sample, len(TABLE_COLORS) + 1, 1)
+        self.scope = QComboBox()
+        self.scope.addItem(L('هذا الجدول فقط', 'This table only'), 'one')
+        self.scope.addItem(L('كل جداول الدليل (تصبح ألوان الدليل)', 'Every table of the manual (becomes the manual colours)'), 'all')
+        fit(self.scope, 330)
+        field(g, len(TABLE_COLORS) + 2, 0, L('تُطبَّق على', 'Applies to'), self.scope)
+        g.setColumnStretch(1, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText(L('تطبيق', 'Apply'))
+        bb.button(QDialogButtonBox.Cancel).setText(L('إلغاء', 'Cancel'))
+        name_buttons(bb)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay = QVBoxLayout(self)
+        lay.addLayout(g)
+        lay.addWidget(bb)
+        self._paint()
+
+    def _theme(self, i):
+        k = self.theme.itemData(i)
+        if k == 'design':
+            self.values = dict(self.design)
+        elif k:
+            self.values = dict(TABLE_THEMES[k][1])
+        self._paint()
+
+    def _pick(self, k):
+        c = QColorDialog.getColor(QColor(self.values.get(k) or '#ffffff'), self, L(*TABLE_COLORS[k][1]))
+        if c.isValid():
+            self.values[k] = c.name().upper()
+            self._paint()
+
+    def _paint(self):
+        for k, b in self.buttons.items():
+            c = self.values.get(k) or '#ffffff'
+            light = QColor(c).lightness() > 150
+            b.setText('\u200e' + c.upper())          # the colour code reads left to right
+            b.setStyleSheet(f'background:{c};color:{"#1e293b" if light else "#ffffff"};border:1px solid #c9d4e3;border-radius:6px')
+        v = self.values
+        cell = f'border:1px solid {v["border"]};padding:3px 10px;color:{v["text"]}'
+        rows = ''.join(f'<tr><td style="{cell};background:{v["stripe"] if i % 2 else "#ffffff"}">{L("خلية", "Cell")} {i}</td>'
+                       f'<td style="{cell};background:{v["stripe"] if i % 2 else "#ffffff"}">…</td></tr>' for i in (1, 2, 3))
+        self.sample.setText(f'<table cellspacing="0" style="border-collapse:collapse"><tr>'
+                            f'<th style="background:{v["head"]};color:{v["head_text"]};border:1px solid {v["border"]};padding:3px 10px">'
+                            f'{L("العمود الأول", "First column")}</th><th style="background:{v["head"]};color:{v["head_text"]};'
+                            f'border:1px solid {v["border"]};padding:3px 10px">{L("العمود الثاني", "Second column")}</th></tr>{rows}</table>')
+
+    def result_colors(self):
+        """Only the colours that differ from the manual's are kept on a single table."""
+        if self.scope.currentData() == 'all':
+            return 'all', dict(self.values)
+        return 'one', {k: v for k, v in self.values.items() if v and v.upper() != (self.design.get(k) or '').upper()}
+
+
 class TableEditor(QWidget):
-    """A table with an Arabic and an English layer (switched above the grid): columns, rows, presets."""
+    """A table with an Arabic and an English layer (switched above the grid): columns, rows, presets, colours."""
     changed = Signal()
+    colors_for_all = Signal(dict)
+    design_colors = None                 # set by the editor: the manual's table colours
 
     def __init__(self, data=None):
         super().__init__()
@@ -304,14 +387,33 @@ class TableEditor(QWidget):
         down.clicked.connect(lambda: self.move_row(1))
         paste = button(L('لصق من Excel', 'Paste from Excel'), 'import')
         paste.clicked.connect(self.paste)
+        colors = button(L('ألوان الجدول…', 'Table colours…'), 'palette')
+        colors.clicked.connect(self.edit_colors)
         self.preset.setMinimumContentsLength(10)
         self.preset.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(flow_row([self.preset, self.lang, self.numbered, self.bold]))
         lay.addWidget(self.grid)
-        lay.addWidget(flow_row([cols, addr, delr, up, down, paste]))
+        lay.addWidget(flow_row([cols, addr, delr, up, down, paste, colors]))
         self.fill()
+
+    def edit_colors(self):
+        design = TableEditor.design_colors or {k: TABLE_THEMES['blue'][1][k] for k in TABLE_COLORS}
+        d = TableColorsDialog(self, self.data.get('colors'), design)
+        if not d.exec():
+            return
+        scope, colors = d.result_colors()
+        if scope == 'all':
+            self.data.pop('colors', None)
+            self.changed.emit()
+            self.colors_for_all.emit(colors)
+        else:
+            if colors:
+                self.data['colors'] = colors
+            else:
+                self.data.pop('colors', None)
+            self.changed.emit()
 
     def fill(self):
         self.grid.blockSignals(True)
@@ -473,6 +575,7 @@ class BlockWidget(QFrame):
     move = Signal(object, int)
     focused = Signal(object)
     insert_after = Signal(object)
+    table_colors = Signal(dict)
 
     def __init__(self, ctx, block):
         super().__init__()
@@ -548,6 +651,7 @@ class BlockWidget(QFrame):
         elif k == 'table':
             self.table = TableEditor(dict(d) if d.get('columns') else table_data('custom'))
             self.table.changed.connect(self.changed.emit)
+            self.table.colors_for_all.connect(self.table_colors.emit)
             self.body.addWidget(self.table)
         elif k == 'links':
             self.links = LinksEditor(d.get('items') or [])
@@ -691,6 +795,7 @@ def _clear_layout(lay):
 # ── the section's own properties ────────────────────────────────────────────────────────────────────
 class SectionForm(QWidget):
     changed = Signal()
+    table_colors = Signal(dict)
 
     def __init__(self, ctx):
         super().__init__()
@@ -862,6 +967,7 @@ class SectionForm(QWidget):
         if s['kind'] == 'table':
             self.table = TableEditor(dict(d) if d.get('columns') else table_data('custom'))
             self.table.changed.connect(self.changed.emit)
+            self.table.colors_for_all.connect(self.table_colors.emit)
             self.table_lay.addWidget(self.table)
         self._kind_boxes()
 
@@ -926,8 +1032,35 @@ class SectionForm(QWidget):
 
 
 # ── preview ─────────────────────────────────────────────────────────────────────────────────────────
+# a click on the pages names what was clicked; the page script reports it through the console
+PICK_JS = r"""
+(function(){if(window.__mbPick)return;window.__mbPick=1;
+var st=document.createElement('style');st.textContent='[data-b]:hover,[data-sid]:hover>.frame{outline:2px dashed #0C67EC;outline-offset:1px;cursor:pointer}'
+ +'.pagedjs_margin:hover{outline:2px dashed #F28C28;cursor:pointer}';document.head.appendChild(st);
+document.addEventListener('click',function(e){var t=e.target,side=t.closest('.en')?'en':'ar';
+ var b=t.closest('[data-b]');if(b){console.log('MBPICK b '+b.getAttribute('data-b')+' '+side);return;}
+ var s=t.closest('[data-sid]');if(s){console.log('MBPICK s '+s.getAttribute('data-sid'));return;}
+ var m=t.closest('.pagedjs_margin');if(m){console.log('MBPICK m '+(m.className.indexOf('bottom')>=0?'footer':'header'));return;}
+ var p=t.closest('.pagedjs_page');if(p){console.log('MBPICK p '+(p.classList.contains('pagedjs_cover_page')?'cover':'page'));}
+},true);})();
+"""
+
+
+def _picking_page(parent, on_pick):
+    from PySide6.QtWebEngineCore import QWebEnginePage
+
+    class Page(QWebEnginePage):
+        def javaScriptConsoleMessage(self, level, message, line, source):    # noqa: N802 (Qt name)
+            if message.startswith('MBPICK '):
+                on_pick(message[7:])
+
+    return Page(parent)
+
+
 class Preview(QWidget):
-    """The printed pages, laid out by the same engine as the PDF."""
+    """The printed pages, laid out by the same engine as the PDF. A click on a block, a section, the header or the
+    footer reports it (``picked``) so its editor opens."""
+    picked = Signal(str)
 
     def __init__(self, ctx):
         super().__init__()
@@ -966,7 +1099,26 @@ class Preview(QWidget):
         super().resizeEvent(e)
         self._zoom()
 
+    def _arm(self, tries=0):
+        """Paged.js lays the pages out after the load; the click script is added once they exist."""
+        if self.view is None:
+            return
+
+        def ready(n):
+            if n:
+                self.view.page().runJavaScript(PICK_JS)
+                if getattr(self, '_scroll_back', None):
+                    self.view.page().runJavaScript(f'window.scrollTo(0,{int(self._scroll_back)})')
+            elif tries < 40:
+                QTimer.singleShot(250, lambda: self._arm(tries + 1))
+        self.view.page().runJavaScript("document.querySelectorAll('.pagedjs_page').length", 0, ready)
+
     def show_html(self, html, page_w=None):
+        import hashlib
+        digest = hashlib.md5(html.encode('utf-8', 'surrogatepass')).hexdigest()
+        if self.view is not None and digest == getattr(self, '_digest', None):
+            return                                  # nothing changed: the pages are not laid out again
+        self._digest = digest
         self.page_w = page_w or getattr(self, 'page_w', None)
         if self.view is None:
             try:
@@ -976,13 +1128,18 @@ class Preview(QWidget):
                 self.holder.setText(L('المعاينة غير متاحة على هذا الجهاز.', 'The preview is not available on this computer.'))
                 return
             self.view = QWebEngineView()
+            self.view.setPage(_picking_page(self.view, self.picked.emit))
             settings_for(self.view.page())
             self.view.loadFinished.connect(lambda _ok: self._zoom())
+            self.view.loadFinished.connect(lambda _ok: self._arm())
             a11y(self.view, L('معاينة الصفحات', 'Page preview'))
             self.lay.replaceWidget(self.holder, self.view)
             self.holder.hide()
         from ..core.pdf import write_html
         path = write_html(html, os.path.join(self.ctx.data_dir, 'preview'), 'preview.html')
+        self._scroll_back = None
+        if self.view.url().isValid() and not self.view.url().isEmpty():
+            self.view.page().runJavaScript('window.scrollY', 0, lambda y: setattr(self, '_scroll_back', y))
         self.view.load(QUrl.fromLocalFile(path))
         self.state.setText('')
 
@@ -1041,6 +1198,7 @@ class EditorTab(QWidget):
         # middle: the section
         self.form = SectionForm(ctx)
         self.form.changed.connect(self._touch)
+        self.form.table_colors.connect(self.colors_for_all_tables)
         self.fmt = FormatBar()
         self.block_list = QVBoxLayout()
         self.block_list.setSpacing(8)
@@ -1108,10 +1266,11 @@ class EditorTab(QWidget):
 
         self.preview = Preview(ctx)
         self.preview.refresh_btn.clicked.connect(lambda: self.refresh_preview(force=True))
+        self.preview.picked.connect(self.picked)
         self.preview.scope.currentIndexChanged.connect(lambda: self.refresh_preview(force=True))
         self._ptimer = QTimer(self)
         self._ptimer.setSingleShot(True)
-        self._ptimer.setInterval(1800)
+        self._ptimer.setInterval(2500)
         self._ptimer.timeout.connect(self.refresh_preview)
 
         split = QSplitter(Qt.Horizontal)
@@ -1144,6 +1303,7 @@ class EditorTab(QWidget):
             self.save(quiet=True)
         self.mid = mid
         self.sid = None
+        self._design_table_colors()
         m = self.db.manual(mid) if mid else None
         self.title.setText((m['title_ar'] or m['title_en'] or '') if m else L('لا يوجد دليل مفتوح — أنشئ دليلاً من صفحة «الأدلة».',
                                                                             'No manual is open — create one on the «Manuals» page.'))
@@ -1232,11 +1392,17 @@ class EditorTab(QWidget):
             self.refresh_preview(force=True)
 
     def _reload_blocks(self):
+        # the blocks are built with the box hidden: added to a shown layout, each one lays the window out again
+        box = self.blocks_box
+        box.setUpdatesEnabled(False)
+        box.hide()
         _clear_layout(self.block_list)
         self.blocks = []
         for b in self.db.blocks(self.sid):
             self._append_block(b)
         size_tree(self.scroll)
+        box.show()
+        box.setUpdatesEnabled(True)
 
     def goto(self, sid, b=None, path=None):
         """Opens a section and brings one of its blocks into view (used by the checker)."""
@@ -1265,6 +1431,7 @@ class EditorTab(QWidget):
         w.remove.connect(self._remove_block)
         w.move.connect(self._move_block)
         w.insert_after.connect(lambda src: self._add_block_menu(self.blocks.index(src) + 1))
+        w.table_colors.connect(self.colors_for_all_tables)
         w.focused.connect(self.fmt.set_target)
         if at is None:
             self.block_list.addWidget(w)
@@ -1337,6 +1504,46 @@ class EditorTab(QWidget):
         self.block_list.removeWidget(w)
         self.block_list.insertWidget(j, w)
         self._touch()
+
+    def picked(self, what):
+        """A click on the preview: the block (or section) opens here, the header, footer or cover in the design."""
+        parts = what.split()
+        try:
+            if parts[0] == 'b':
+                sid, i = parts[1].split(':')
+                self.goto(int(sid), int(i) if i else None, [parts[2]] if len(parts) > 2 else None)
+            elif parts[0] == 's':
+                self.goto(int(parts[1]))
+            elif self.ctx.window:
+                self.ctx.window.open_design({'header': 'header', 'footer': 'header', 'cover': 'background',
+                                             'page': 'background'}.get(parts[1], 'page'))
+        except (IndexError, ValueError):
+            return
+
+    def _design_table_colors(self):
+        m = self.db.manual(self.mid) if self.mid else None
+        c = layout_with_defaults(m['layout'] if m else None)['colors']
+        TableEditor.design_colors = {k: c.get(dk) or TABLE_THEMES['blue'][1][k] for k, (dk, _n) in TABLE_COLORS.items()}
+
+    def colors_for_all_tables(self, colors):
+        """The colours become the manual's table colours, and no table keeps colours of its own."""
+        if not self.mid:
+            return
+        self.save(quiet=True)
+        m = self.db.manual(self.mid)
+        lay = layout_with_defaults(m['layout'])
+        for k, (dk, _n) in TABLE_COLORS.items():
+            if colors.get(k):
+                lay['colors'][dk] = colors[k]
+        self.db.save_manual({'layout': lay}, self.mid)
+        n = self.db.clear_table_colors(self.mid)
+        self._design_table_colors()
+        if self.sid:
+            sid, self.sid = self.sid, None
+            self.reload_tree(select=sid)          # the open section is drawn again without its own colours
+        self.refresh_preview(force=True)
+        info(self, L(f'طُبّقت الألوان على كل جداول الدليل، وأُزيلت الألوان الخاصة من {n} جدولاً.',
+                     f'The colours apply to every table of the manual; {n} table(s) lost colours of their own.'))
 
     # ── sections ─────────────────────────────────────────────────────
     def _add_menu(self, child):
@@ -1508,7 +1715,7 @@ class EditorTab(QWidget):
         if self.preview.scope.currentData() == 'section' and self.sid:
             only = [self.sid]
         try:
-            html = build_html(self.db, self.mid, 'print', only=only, workflow=self.ctx.workflow)
+            html = build_html(self.db, self.mid, 'print', only=only, workflow=self.ctx.workflow, draft=True)
         except Exception as e:  # noqa: BLE001 — a preview must never take the editor down
             self.preview.state.setText(str(e)[:120])
             return

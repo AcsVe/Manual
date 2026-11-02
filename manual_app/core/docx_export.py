@@ -186,12 +186,13 @@ class DocxExporter:
                 self.write_runs(p, x, rtl)
 
     # ── tables ───────────────────────────────────────────────────────
-    def cell_text(self, cell, v, header=False):
+    def cell_text(self, cell, v, header=False, color=None):
         p = cell.paragraphs[0]
         if isinstance(v, str):
             v = {'ar': v, 'en': ''}
         a, e = (v or {}).get('ar') or '', (v or {}).get('en') or ''
-        color = self.c['table_head_text'] if header else None
+        if color is None:
+            color = self.c['table_head_text'] if header else None
         if self.lm == 'en' or (not a and e):
             self.write_runs(p, e or a, False, 9, header, color)
         elif self.lm == 'ar' or not e or a == e:
@@ -200,7 +201,12 @@ class DocxExporter:
             self.write_runs(p, a, True, 9, header, color)
             self.write_runs(cell.add_paragraph(), e, False, 8.5, header, color)
 
-    def table(self, cols, rows, numbered=False):
+    def table(self, cols, rows, numbered=False, colors=None):
+        own = colors or {}
+        head = own.get('head') or self.c['table_head']
+        head_text = own.get('head_text') or self.c['table_head_text']
+        stripe = own.get('stripe') or self.c.get('table_stripe')
+        text = own.get('text') or None
         rows = [r for r in rows if any(((x or {}).get('ar') or (x or {}).get('en')) if isinstance(x, dict) else x for x in r)]
         n = len(cols) + (1 if numbered else 0)
         t = self.doc.add_table(rows=1 + len(rows), cols=n)
@@ -212,12 +218,14 @@ class DocxExporter:
             tblpr.append(OxmlElement('w:bidiVisual'))
         for j, h in enumerate(heads):
             c = t.cell(0, j)
-            _shade(c, self.c['table_head'])
-            self.cell_text(c, h, header=True)
+            _shade(c, head)
+            self.cell_text(c, h, header=True, color=head_text)
         for i, r in enumerate(rows, 1):
             vals = ([str(i)] if numbered else []) + list(r[:len(cols)])
             for j, v in enumerate(vals):
-                self.cell_text(t.cell(i, j), v)
+                if stripe and i % 2 == 0 and stripe.upper() != '#FFFFFF':
+                    _shade(t.cell(i, j), stripe)
+                self.cell_text(t.cell(i, j), v, color=text)
         # the header row repeats on every page
         trpr = t.rows[0]._tr.get_or_add_trPr()
         trpr.append(OxmlElement('w:tblHeader'))
@@ -368,7 +376,7 @@ class DocxExporter:
         self.heading(s, depth + 1)
         d = s.get('data') or {}
         if d.get('columns'):
-            self.table(d['columns'], d.get('rows') or [], d.get('numbered'))
+            self.table(d['columns'], d.get('rows') or [], d.get('numbered'), d.get('colors'))
         for b in self.db.blocks(s['id']):
             self.block(b)
 
@@ -427,7 +435,7 @@ class DocxExporter:
             self.page_break()
         elif k == 'table':
             if d.get('columns'):
-                self.table(d['columns'], d.get('rows') or [], d.get('numbered'))
+                self.table(d['columns'], d.get('rows') or [], d.get('numbered'), d.get('colors'))
         elif k == 'image':
             a = self.db.asset(int(d['asset_id'])) if d.get('asset_id') else None
             if a:

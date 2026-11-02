@@ -151,8 +151,8 @@ def _b64(data, mime):
 class Renderer:
     """Builds the HTML of one manual. ``embed``: fonts inside the file (web copy) instead of next to it."""
 
-    def __init__(self, db, manual_id, mode='print', embed=False, only=None, workflow=False):
-        self.db, self.mode, self.embed = db, mode, embed
+    def __init__(self, db, manual_id, mode='print', embed=False, only=None, workflow=False, draft=False):
+        self.db, self.mode, self.embed, self.draft = db, mode, embed, draft
         self.m = db.manual(manual_id)
         self.lay = layout_with_defaults(self.m['layout'])
         self.lm = self.lay['lang_mode']
@@ -177,7 +177,12 @@ class Renderer:
             return ''
         if asset_id not in self._asset_cache:
             a = self.db.asset(int(asset_id))
-            self._asset_cache[asset_id] = _b64(a['data'], a['mime']) if a else ''
+            if not a:
+                self._asset_cache[asset_id] = ''
+            elif self.draft:
+                self._asset_cache[asset_id] = draft_uri(a)
+            else:
+                self._asset_cache[asset_id] = _b64(a['data'], a['mime'])
         return self._asset_cache[asset_id]
 
     def bg_uri(self, bg):
@@ -453,7 +458,8 @@ class Renderer:
 {front_boxes}
 {reset}
 :root{{--p:{c['primary']};--s:{c['secondary']};--a:{c['accent']};--t:{c['text']};--h:{c['heading']};
-  --th:{c['table_head']};--tht:{c['table_head_text']};--bb:{c['box_border']};--co:{c['callout']}}}
+  --th:{c['table_head']};--tht:{c['table_head_text']};--bb:{c['box_border']};--co:{c['callout']};
+  --ts:{c.get('table_stripe', '#F6F9FD')};--tb:{c.get('table_border', c['box_border'])};--ttx:{c.get('table_text', c['text'])}}}
 html{{font-family:"{f['ar']}","{f['en']}",Tajawal,"MB symbols-2","MB symbols-1","MB symbols-math",Arial,sans-serif;font-size:{f['size']}pt;line-height:{f['line']};color:var(--t)}}
 body{{margin:0}} body.rtl .sec,body.rtl .chapter-page,body.rtl .toc{{direction:rtl}} body.rtl table.t{{direction:rtl}} body.rtl table.t.mirrored{{direction:ltr}}
 .en,.en *{{font-family:"{f['en']}","{f['ar']}","MB symbols-2","MB symbols-1","MB symbols-math",Arial,sans-serif}}
@@ -489,9 +495,9 @@ ul,ol{{margin:0 0 2mm;padding-inline-start:6mm}} li{{margin:0 0 .8mm}}
 .callout{{background:var(--co);border-inline-start:1.2mm solid var(--a);padding:2.5mm 4mm;margin:0 0 3mm}}
 .quote{{border-inline-start:1mm solid var(--s);padding:1mm 4mm;color:#45526a;font-style:italic}}
 table.t{{width:100%;border-collapse:collapse;margin:0 0 4mm;font-size:.92em}}
-table.t th{{background:var(--th);color:var(--tht);font-weight:700;padding:1.6mm 2mm;border:0.3mm solid var(--bb);text-align:center}}
-table.t td{{padding:1.4mm 2mm;border:0.3mm solid var(--bb);vertical-align:top}}
-table.t tr:nth-child(even) td{{background:#f6f9fd}} table.t thead{{display:table-header-group}} table.t tr{{break-inside:avoid}}
+table.t th{{background:var(--th);color:var(--tht);font-weight:700;padding:1.6mm 2mm;border:0.3mm solid var(--tb);text-align:center}}
+table.t td{{padding:1.4mm 2mm;border:0.3mm solid var(--tb);vertical-align:top;color:var(--ttx)}}
+table.t tr:nth-child(even) td{{background:var(--ts)}} table.t thead{{display:table-header-group}} table.t tr{{break-inside:avoid}}
 table.t.split tr{{break-inside:auto}} table.t.compact td,table.t.compact th{{padding:.8mm 1.2mm}}
 table.t td.n{{text-align:center;width:7mm;color:#55607a}} table.t td .en{{direction:ltr;text-align:left;color:#334;font-size:.95em}}
 table.t .first{{font-weight:700}}
@@ -993,8 +999,12 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
             cap = f'<div class="h-sub">{self.pair(d.get("caption_ar"), d.get("caption_en"))}</div>'
         cls = 't' + (' split' if d.get('split_rows') else '') + (' compact' if d.get('compact') else '')
         scale = int(d.get('scale') or 100)
-        attrs = (f' style="font-size:{0.92 * scale / 100:.3f}em"' if scale != 100 else '') + \
-            (f' data-b="{self._bref}"' if self._bref else '')
+        style = [f'font-size:{0.92 * scale / 100:.3f}em'] if scale != 100 else []
+        var = {'head': '--th', 'head_text': '--tht', 'stripe': '--ts', 'border': '--tb', 'text': '--ttx'}
+        for k, v in (d.get('colors') or {}).items():          # this table's own colours
+            if k in var and isinstance(v, str) and re.fullmatch(r'#[0-9a-fA-F]{6}', v):
+                style.append(f'{var[k]}:{v}')
+        attrs = (f' style="{";".join(style)}"' if style else '') + (f' data-b="{self._bref}"' if self._bref else '')
         return f'{cap}<table class="{cls}"{attrs}><thead><tr>{th}</tr></thead><tbody>{"".join(trs)}</tbody></table>'
 
     def policy_footer(self, s):
@@ -1020,6 +1030,41 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         return ''.join(out)
 
 
-def build_html(db, manual_id, mode='print', embed=None, only=None, workflow=False):
+_DRAFTS = {}
+
+
+def draft_uri(a, side=1300):
+    """A large picture made smaller for the on-screen preview only (the PDF keeps the original): a page imported
+    from PDF can be several megabytes, and every preview would carry it again."""
+    key = (a['id'], len(a['data']))
+    if key in _DRAFTS:
+        return _DRAFTS[key]
+    uri = _b64(a['data'], a['mime'])
+    big = (a.get('width') or 0) > side or (a.get('height') or 0) > side or len(a['data']) > 400_000
+    if big and a['mime'] in ('image/png', 'image/jpeg', 'image/bmp', 'image/webp', 'image/gif'):
+        try:
+            from PySide6.QtCore import QBuffer, QIODevice, Qt
+            from PySide6.QtGui import QImage
+            img = QImage()
+            if img.loadFromData(a['data']):
+                if max(img.width(), img.height()) > side:
+                    img = img.scaled(side, side, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                buf = QBuffer()
+                buf.open(QIODevice.WriteOnly)
+                fmt = 'PNG' if img.hasAlphaChannel() else 'JPG'
+                img.save(buf, fmt, 82)
+                small = bytes(buf.data())
+                if len(small) < len(a['data']):
+                    uri = _b64(small, 'image/png' if fmt == 'PNG' else 'image/jpeg')
+        except Exception:  # noqa: BLE001 — the original picture is used
+            pass
+    if len(_DRAFTS) > 400:
+        _DRAFTS.clear()
+    _DRAFTS[key] = uri
+    return uri
+
+
+def build_html(db, manual_id, mode='print', embed=None, only=None, workflow=False, draft=False):
+    """``draft``: the on-screen preview (large pictures made smaller); never for an export."""
     return Renderer(db, manual_id, mode, embed=(mode == 'web') if embed is None else embed, only=only,
-                    workflow=workflow).render()
+                    workflow=workflow, draft=draft).render()

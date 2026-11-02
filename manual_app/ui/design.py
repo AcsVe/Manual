@@ -23,7 +23,8 @@ COLOR_NAMES = {'primary': ('اللون الأساسي', 'Primary colour'), 'seco
                'accent': ('لون التمييز', 'Accent colour'), 'text': ('لون النص', 'Text colour'),
                'heading': ('لون العناوين', 'Heading colour'), 'table_head': ('رأس الجداول', 'Table header'),
                'table_head_text': ('نص رأس الجداول', 'Table header text'), 'box_border': ('إطار الأقسام', 'Section frame'),
-               'callout': ('خلفية مربع التنبيه', 'Callout background')}
+               'callout': ('خلفية مربع التنبيه', 'Callout background'), 'table_stripe': ('أسطر الجداول المتناوبة', 'Alternate table rows'),
+               'table_border': ('حدود الجداول', 'Table borders'), 'table_text': ('نص خلايا الجداول', 'Table cell text')}
 
 
 class TokenEdit(QWidget):
@@ -194,6 +195,8 @@ class DesignTab(QWidget):
         self.h_logo = QCheckBox(L('الشعار في الترويسة', 'Logo in the header'))
         self.h_image = QPushButton(L('صورة الترويسة…', 'Header image…'))
         self.h_image.clicked.connect(lambda: self._pick('header'))
+        h_clear = icon_button('close', L('إزالة صورة الترويسة', 'Remove the header image'))
+        h_clear.clicked.connect(lambda: self._set_asset('header', None))
         self.h_start, self.h_center, self.h_end = TokenEdit(), TokenEdit(), TokenEdit()
         self.f_style = QComboBox()
         self.f_style.addItem(L('خط فاصل', 'Separator line'), 'line')
@@ -220,7 +223,7 @@ class DesignTab(QWidget):
             fit(w, n)
         hg = form_grid()
         hr = QHBoxLayout()
-        for w in (self.h_style, self.h_height, self.h_logo, self.h_image):
+        for w in (self.h_style, self.h_height, self.h_logo, self.h_image, h_clear):
             hr.addWidget(w)
         hr.addStretch(1)
         field(hg, 0, 0, L('شكل الترويسة', 'Header style'), hr, 3)
@@ -286,7 +289,7 @@ class DesignTab(QWidget):
         cg = QGridLayout()
         cg.setHorizontalSpacing(12)
         for i, (k, (ar, en)) in enumerate(COLOR_NAMES.items()):
-            b = QPushButton()
+            b = ltr(QPushButton())
             b.setFixedWidth(110)
             b.clicked.connect(lambda _=False, kk=k: self._color(kk))
             a11y(b, L(ar, en))
@@ -295,7 +298,7 @@ class DesignTab(QWidget):
             cg.addWidget(b, i // 3, (i % 3) * 2 + 1)
         reset = button(L('الألوان الافتراضية', 'Default colours'), 'reset', 'ghost')
         reset.clicked.connect(self._reset_colors)
-        cg.addWidget(reset, 3, 0, 1, 2)
+        cg.addWidget(reset, (len(COLOR_NAMES) + 2) // 3, 0, 1, 2)
         cbox = card(L('الألوان', 'Colours'))
         cbox.setLayout(cg)
 
@@ -324,6 +327,7 @@ class DesignTab(QWidget):
         self.preview.scope.hide()
         self.preview.auto.hide()
         self.preview.refresh_btn.clicked.connect(self.refresh_preview)
+        self.preview.picked.connect(self._picked)
         self.preview.lay.itemAt(0).layout().insertWidget(0, self.preview_scope)
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self.tabs)
@@ -354,6 +358,19 @@ class DesignTab(QWidget):
             if w is not self.preview.auto:
                 w.toggled.connect(self._changed)
         self.undo_btn.setEnabled(False)
+
+    TABS = {'details': 0, 'page': 1, 'header': 2, 'background': 3, 'numbers': 4, 'colours': 5}
+
+    def open_tab(self, name):
+        self.tabs.setCurrentIndex(self.TABS.get(name, 1))
+
+    def _picked(self, what):
+        kind, _, rest = what.partition(' ')
+        if kind in ('b', 's'):
+            if self.ctx.window:
+                self.ctx.window.open_in_editor(what)
+        else:
+            self.open_tab({'header': 'header', 'footer': 'header', 'cover': 'background'}.get(rest, 'page'))
 
     def _changed(self, *_):
         if self._loading or not self.mid:
@@ -388,7 +405,7 @@ class DesignTab(QWidget):
             if first_content:
                 only.append(first_content['id'])
         try:
-            html = build_html(self.db, self.mid, 'print', only=only, workflow=self.ctx.workflow)
+            html = build_html(self.db, self.mid, 'print', only=only, workflow=self.ctx.workflow, draft=True)
         except Exception as e:  # noqa: BLE001 — a preview must never take the page down
             self.preview.state.setText(str(e)[:120])
             return
@@ -517,7 +534,7 @@ class DesignTab(QWidget):
         for k, b in self.colors.items():
             c = self.color_values.get(k, '#000000')
             light = QColor(c).lightness() > 150
-            b.setText(c.upper())
+            b.setText('\u200e' + c.upper())          # the colour code reads left to right
             b.setStyleSheet(f'background:{c};color:{"#1e293b" if light else "#ffffff"};border:1px solid #c9d4e3;border-radius:6px')
 
     def _color(self, k):

@@ -39,7 +39,24 @@ def add_image_file(db, path, kind='image'):
     return db.add_asset(os.path.basename(path), data, mime, kind, w, h)
 
 
+_THUMBS = {}
+
+
 def asset_pixmap(db, asset_id, size=96):
+    """A small picture of an image, kept once made (a page imported from PDF takes long to read each time)."""
+    if not asset_id:
+        return QPixmap()
+    key = (id(db), int(asset_id), size)
+    if key in _THUMBS:
+        return _THUMBS[key]
+    pm = _make_pixmap(db, asset_id, size)
+    if len(_THUMBS) > 600:
+        _THUMBS.clear()
+    _THUMBS[key] = pm
+    return pm
+
+
+def _make_pixmap(db, asset_id, size):
     a = db.asset(asset_id) if asset_id else None
     if not a:
         return QPixmap()
@@ -226,7 +243,19 @@ class LibraryTab(QWidget):
         ids = self.grid.selected_ids()
         if not ids or not confirm(self, L(f'حذف {len(ids)} صورة؟', f'Delete {len(ids)} image(s)?')):
             return
-        kept = self.db.delete_assets(ids)
+        used = {i: self.db.asset_use_names(i) for i in ids}
+        used = {i: v for i, v in used.items() if v}
+        detach = False
+        if used:
+            places = [p for v in used.values() for p in v]
+            shown = '\n'.join('• ' + L(ar, en) for ar, en in places[:12]) + ('\n…' if len(places) > 12 else '')
+            detach = confirm(self, L(f'{len(used)} من الصور المحددة مستخدمة في:\n{shown}\n\nإزالتها من هذه المواضع ثم حذفها؟ '
+                                     'تُحذف كتلة الصورة من القسم، وتُزال الخلفية أو الشعار أو صورة الترويسة.',
+                                     f'{len(used)} of the selected images are used in:\n{shown}\n\nTake them out of these places and '
+                                     'delete them? The image block is deleted from the section, and the background, logo or header image is removed.'))
+        kept = self.db.delete_assets(ids, detach=detach)
         self.reload()
+        if used and detach and self.ctx.window:
+            self.ctx.window.manual_changed()
         if kept:
             info(self, L(f'لم تُحذف {len(kept)} صورة لأنها مستخدمة في دليل.', f'{len(kept)} image(s) were kept because a manual uses them.'))

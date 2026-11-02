@@ -473,23 +473,113 @@ class Database:
         return self._save('assets', {'name': name, 'data': data, 'mime': mime, 'kind': kind,
                                      'width': width, 'height': height}, stamp=False)
 
-    def asset_in_use(self, asset_id):
-        """Where an image is used (to protect it from deletion)."""
-        needle = f'"{asset_id}"'
-        hits = []
-        for t, cols in (('manuals', ('logo_id', 'layout')), ('sections', ('style', 'data')), ('blocks', ('data', 'style'))):
-            for r in self.conn.execute(f'SELECT id, {", ".join(cols)} FROM {t}'):
+    ASSET_KEYS = ('asset_id', 'image_id', 'bg_id', 'page_bg_id')
+    ASSET_PLACES = (('manuals', ('layout',)), ('sections', ('style', 'data')), ('blocks', ('data', 'style')))
+
+    @classmethod
+    def _asset_refs(cls, obj, asset_id, path=()):
+        """The paths inside a JSON value that hold ``asset_id`` under one of the image keys (exact match only)."""
+        out = []
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k in cls.ASSET_KEYS and v is not None and str(v) == str(asset_id):
+                    out.append(path + (k,))
+                elif isinstance(v, (dict, list)):
+                    out += cls._asset_refs(v, asset_id, path + (k,))
+        elif isinstance(obj, list):
+            for i, v in enumerate(obj):
+                out += cls._asset_refs(v, asset_id, path + (i,))
+        return out
+
+    def asset_uses(self, asset_id):
+        """Every place an image is used: [(table, row id, column, path inside the value)]."""
+        hits = [('manuals', r['id'], 'logo_id', ()) for r in
+                self.conn.execute('SELECT id FROM manuals WHERE logo_id = ?', (asset_id,))]
+        for t, cols in self.ASSET_PLACES:
+            needle = f'%{asset_id}%'
+            where = ' OR '.join(f'{c} LIKE ?' for c in cols)
+            for r in self.conn.execute(f'SELECT id, {", ".join(cols)} FROM {t} WHERE {where}', [needle] * len(cols)):
                 for c in cols:
-                    v = r[c]
-                    if v is None:
-                        continue
-                    if (c == 'logo_id' and v == asset_id) or (isinstance(v, str) and (
-                            f'_id": {asset_id}' in v or f'_id":{asset_id}' in v or needle in v
-                            or f'"asset_id": {asset_id},' in v or f'"asset_id": {asset_id}}}' in v)):
-                        hits.append((t, r['id']))
+                    for path in self._asset_refs(_j(r[c], {}), asset_id):
+                        hits.append((t, r['id'], c, path))
         return hits
 
-    def delete_assets(self, ids):
+    def asset_in_use(self, asset_id):
+        """Where an image is used (to protect it from deletion)."""
+        return [(t, rid) for t, rid, _c, _p in self.asset_uses(asset_id)]
+
+    def asset_use_names(self, asset_id):
+        """Readable places, for the message shown before an image is taken out of use: (Arabic, English)."""
+        out = []
+        for t, rid, c, path in self.asset_uses(asset_id):
+            if t == 'manuals':
+                m = self.manual(rid) or {}
+                where = {'logo_id': ('الشعار', 'the logo')}.get(c) or (
+                    ('خلفية الصفحات', 'the page background') if 'page_bg' in str(path) or 'page_bg_id' in path else
+                    ('خلفية الغلاف', 'the cover background') if 'cover' in path else
+                    ('صورة الترويسة', 'the header image') if 'header' in path else ('التصميم', 'the design'))
+                out.append((f'{m.get("title_ar") or m.get("title_en") or ""}: {where[0]}',
+                            f'{m.get("title_en") or m.get("title_ar") or ""}: {where[1]}'))
+            else:
+                sid = rid if t == 'sections' else (self.conn.execute('SELECT section_id FROM blocks WHERE id = ?', (rid,)).fetchone() or [None])[0]
+                s = self.section(sid) if sid else None
+                title = (s or {}).get('title_ar') or (s or {}).get('title_en') or ''
+                kind = ('خلفية القسم', 'section background') if t == 'sections' and c == 'style' else ('صورة في القسم', 'image in the section')
+                out.append((f'{kind[0]} «{title}»', f'{kind[1]} «{(s or {}).get("title_en") or title}»'))
+        return out
+
+    def detach_asset(self, asset_id):
+        """Takes an image out of every place that uses it: the logo and the header image are cleared, a background
+        is removed, and an image block is deleted (an empty image would print a hole)."""
+        uses = self.asset_uses(asset_id)
+        for t, rid, c, path in uses:
+            if c == 'logo_id':
+                self.conn.execute('UPDATE manuals SET logo_id = NULL WHERE id = ?', (rid,))
+                continue
+            if t == 'blocks' and c == 'data' and path == ('asset_id',):
+                self.conn.execute('DELETE FROM blocks WHERE id = ?', (rid,))
+                continue
+            row = self.conn.execute(f'SELECT {c} FROM {t} WHERE id = ?', (rid,)).fetchone()
+            if row is None:
+                continue
+            val = _j(row[0], {})
+            parent = val
+            for k in path[:-2]:
+                parent = parent[k]
+            last, key = (path[-2] if len(path) > 1 else None), path[-1]
+            holder = parent[last] if last is not None else parent
+            if key == 'asset_id' and last in ('bg', 'page_bg') and isinstance(holder, dict):
+                if holder.get('color'):
+                    holder['asset_id'] = None          # the colour of that background stays
+                else:
+                    parent[last] = None
+            else:
+                holder[key] = None
+            self.conn.execute(f'UPDATE {t} SET {c} = ? WHERE id = ?', (json.dumps(val, ensure_ascii=False), rid))
+        self.conn.commit()
+        return len(uses)
+
+    def clear_table_colors(self, manual_id):
+        """Removes the colours of their own from every table of a manual (they follow the design again)."""
+        n = 0
+        for s in self.sections(manual_id):
+            d = s.get('data') or {}
+            if isinstance(d, dict) and d.pop('colors', None) is not None:
+                self.conn.execute('UPDATE sections SET data = ? WHERE id = ?', (json.dumps(d, ensure_ascii=False), s['id']))
+                n += 1
+            for b in self.conn.execute("SELECT id, data FROM blocks WHERE section_id = ? AND kind = 'table'", (s['id'],)).fetchall():
+                bd = _j(b['data'], {})
+                if bd.pop('colors', None) is not None:
+                    self.conn.execute('UPDATE blocks SET data = ? WHERE id = ?', (json.dumps(bd, ensure_ascii=False), b['id']))
+                    n += 1
+        self.conn.commit()
+        return n
+
+    def delete_assets(self, ids, detach=False):
+        """Deletes the images; one in use is kept unless ``detach`` (then it is first taken out of use)."""
+        if detach:
+            for i in ids:
+                self.detach_asset(i)
         kept = [i for i in ids if self.asset_in_use(i)]
         gone = [i for i in ids if i not in kept]
         if gone:
