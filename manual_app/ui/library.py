@@ -7,6 +7,7 @@ from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (QDialogButtonBox, QFileDialog, QHBoxLayout, QLabel, QListView, QListWidget,
                                QListWidgetItem, QVBoxLayout, QWidget)
 
+from ..core import backgrounds as BG
 from .common import L, confirm, error, info
 from .theme import SizedDialog, a11y, button, card, hint, name_buttons
 
@@ -211,9 +212,11 @@ class LibraryTab(QWidget):
         else:
             lay = dict(m['layout'])
             if what == 'page_bg':
-                lay['page_bg_id'] = ids[0]
+                lay['page_bg'] = dict(BG.of_page(lay) or BG.normalize({'opacity': 0.08}), asset_id=ids[0])
+                lay['page_bg_id'] = None
             else:
-                lay['cover'] = dict(lay.get('cover') or {}, bg_id=ids[0])
+                cv = {k: v for k, v in (lay.get('cover') or {}).items() if k not in ('bg_id', 'bg_opacity')}
+                lay['cover'] = dict(cv, bg=dict(BG.of_cover(lay) or BG.normalize({}), asset_id=ids[0]))
             self.db.save_manual({'layout': lay}, mid)
         info(self, L('تم. تظهر الصورة في المعاينة والتصدير.', 'Done. The image shows in the preview and the exports.'))
         if self.ctx.window:

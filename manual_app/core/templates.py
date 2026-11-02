@@ -16,7 +16,9 @@ DEFAULT_LAYOUT = {
     'numbering': False,                 # 1, 1.1, 1.1.1 before the titles
     'toc_depth': 2,
     'watermark': '',
-    'page_bg_id': None, 'page_bg_opacity': 0.06,
+    'page_bg_id': None, 'page_bg_opacity': 0.06,    # older manuals; the full description is page_bg
+    'page_bg': None,                    # see backgrounds.py
+    'align': 'justify',                 # text alignment: justify | start (right in Arabic, left in English) | center
     'cover': {'style': 'wave', 'bg_id': None, 'bg_opacity': 1.0},
     'policy_footer': True,              # «responsible to maintain» + change history at the end of every policy
     'draft_mark': True,                 # sections not yet approved carry a «draft» mark (when the workflow is on)
@@ -26,6 +28,10 @@ DEFAULT_LAYOUT = {
     'page_numbers': {'digits': 'latin', 'front': 'same', 'start': 1, 'count_cover': True},
 }
 FRONT_KINDS = ('cover', 'disclaimer', 'doc_control', 'toc')
+ALIGNMENTS = {'justify': ('ضبط الطرفين', 'Justified'), 'start': ('من بداية السطر (يمين العربية ويسار الإنجليزية)', 'From the line start (right in Arabic, left in English)'),
+              'center': ('توسيط', 'Centred')}
+BLOCK_ALIGN = {'': ('كإعداد الدليل', 'As the manual'), 'right': ('يمين', 'Right'), 'center': ('وسط', 'Centre'),
+               'left': ('يسار', 'Left'), 'justify': ('ضبط الطرفين', 'Justified')}
 PAGE_DIGITS = {'latin': ('أرقام لاتينية (1، 2، 3)', 'Western digits (1, 2, 3)'),
                'arabic': ('أرقام عربية مشرقية (١، ٢، ٣)', 'Arabic-Indic digits (١, ٢, ٣)')}
 FRONT_NUMBERING = {'same': ('متصل مع بقية الدليل', 'Continuous with the rest of the manual'),

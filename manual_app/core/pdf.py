@@ -1,5 +1,6 @@
 """PDF from the print HTML: the built-in browser engine (Qt WebEngine) lays the pages out with Paged.js and prints
 them at the manual's exact page size. Also used to write the HTML of the live preview."""
+import json
 import os
 import tempfile
 
@@ -134,6 +135,31 @@ MISSING_JS = r"""
 """
 
 
+ORIENT_JS = r"""
+(function(){var o='';document.querySelectorAll('.pagedjs_page').forEach(function(p){
+  var r=p.getBoundingClientRect(),k=(r.width>r.height+1)?'L':'P';p.setAttribute('data-mbo',k);o+=k;});return o;})()
+"""
+
+
+def merge_orientations(parts, orients):
+    """Each pass printed only the pages of its own direction (the others hidden, or the browser would shrink every
+    page to fit the widest); they are put back in the laid-out order."""
+    import io
+    from pypdf import PdfReader, PdfWriter
+    portrait, landscape = (PdfReader(io.BytesIO(p)) for p in parts)
+    out = PdfWriter()
+    next_page = {'P': 0, 'L': 0}
+    for o in orients:
+        src = landscape if o == 'L' else portrait
+        i = next_page[o]
+        next_page[o] += 1
+        if i < len(src.pages):
+            out.add_page(src.pages[i])
+    buf = io.BytesIO()
+    out.write(buf)
+    return buf.getvalue()
+
+
 class PdfJob(QObject):
     """Loads an HTML file, waits until Paged.js has laid out every page, prints it to ``pdf_path``.
     Signals: progress(pages so far), finished(ok, message)."""
@@ -159,6 +185,8 @@ class PdfJob(QObject):
         self._deadline.setInterval(timeout_s * 1000)
         self._deadline.timeout.connect(lambda: self._done(False, 'timeout'))
         self._finished = False
+        self._busy = False
+        self._parts = []               # the PDF of each orientation when the manual mixes them
 
     def start(self):
         self.view.show()
@@ -181,7 +209,8 @@ class PdfJob(QObject):
         except (TypeError, ValueError):
             return
         self.progress.emit(so_far)
-        if done and not self._finished:
+        if done and not self._finished and not self._busy:
+            self._busy = True
             self._timer.stop()
             if self.audit:
                 self.view.page().runJavaScript(AUDIT_JS, 0, lambda v: self._done(bool(v), str(v or '')))
@@ -197,18 +226,49 @@ class PdfJob(QObject):
             self.missing = int(missing or 0)
         except (TypeError, ValueError):
             self.missing = 0
+        self.view.page().runJavaScript(ORIENT_JS, 0, self._orients)
+
+    def _orients(self, v):
+        """Pages of another orientation (a landscape table in a portrait manual) are printed in a second pass on
+        paper of that orientation, and the two files are put together page by page."""
+        self.orients = str(v or '')
+        w, h = self.size_mm
+        portrait, landscape = (min(w, h), max(w, h)), (max(w, h), min(w, h))
+        kinds = set(self.orients)
+        if len(kinds) <= 1:
+            self._passes = [landscape if self.orients[:1] == 'L' else portrait]
+        else:
+            self._passes = [portrait, landscape]
+        self._next_pass()
+
+    def _next_pass(self):
+        w, h = self._passes[len(self._parts)]
+        css = '@page{size:%smm %smm !important;margin:0 !important}' % (w, h)
+        if len(self._passes) > 1:
+            other = 'P' if w > h else 'L'
+            css += '.pagedjs_page[data-mbo="%s"]{display:none !important}' % other
+        layout = QPageLayout(QPageSize(QSizeF(w, h), QPageSize.Millimeter, 'manual', QPageSize.ExactMatch),
+                             QPageLayout.Portrait, QMarginsF(0, 0, 0, 0))
+        js = ("(function(){var s=document.getElementById('mb-print-size')||document.createElement('style');"
+              "s.id='mb-print-size';s.textContent=%s;document.head.appendChild(s);return 1;})()" % json.dumps(css))
         # the PDF comes back in memory and is written here: Qt's own «print to file» fails on long manuals
-        self.view.page().printToPdf(self._printed, layout)
+        self.view.page().runJavaScript(js, 0, lambda _v: self.view.page().printToPdf(self._printed, layout))
 
     def _printed(self, data):
         data = bytes(data or b'')
         if not data:
             self._done(False, 'empty')
             return
+        self._parts.append(data)
+        if len(self._parts) < len(self._passes):
+            self._next_pass()
+            return
         try:
+            if len(self._parts) > 1:
+                data = merge_orientations(self._parts, self.orients)
             with open(self.pdf_path, 'wb') as f:
                 f.write(data)
-        except OSError as e:
+        except Exception as e:  # noqa: BLE001 — a damaged pass or a file that cannot be written
             self._done(False, str(e))
             return
         self._done(True, self.pdf_path)

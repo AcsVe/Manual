@@ -21,6 +21,7 @@ import json
 import re
 from datetime import date
 
+from . import backgrounds as BG
 from .db import BLOCK_KINDS, SECTION_KINDS
 from .richtext import plain
 from .templates import FRONT_KINDS, PAGE_SIZES, TOKENS, layout_with_defaults
@@ -637,9 +638,11 @@ def check_layout(cx):
                               fix=(f'كتابته بالصيغة {DATE_STYLES[style][0]}', f'Write it as {DATE_STYLES[style][1]}')))
     if hd.get('logo') and not cx.m.get('logo_id'):
         out.append(_issue('logo_flag', fix=('إلغاء خيار الشعار في الترويسة', 'Turn off the logo in the header')))
-    if lay.get('page_bg_id') and float(lay.get('page_bg_opacity') or 0) > 0.25:
+    pbg = BG.of_page(lay)
+    if pbg and pbg['asset_id'] and pbg['opacity'] > 0.25:
+        pc = round(pbg['opacity'] * 100)
         out.append(_issue('bg_strong', extra='page', params={'page': True},
-                          msg=(f'خلفية الصفحات بشفافية {round(float(lay["page_bg_opacity"]) * 100)}%', f'Page background at {round(float(lay["page_bg_opacity"]) * 100)}%'),
+                          msg=(f'صورة خلفية الصفحات بدرجة ظهور {pc}%', f'Page background image at {pc}%'),
                           fix=('خفضها إلى 8%', 'Lower it to 8%')))
     return out
 
@@ -680,9 +683,12 @@ def check(db, manual_id, prefs=None, workflow=False, only=None):
             codes.setdefault(s['code'].strip().lower(), []).append(sid)
         if s.get('next_review') and s['next_review'] < cx.today:
             sec_issues.append(_issue('review_due', sid, msg=(f'كان موعد المراجعة {s["next_review"]}', f'The review was due on {s["next_review"]}')))
-        if st.get('bg_id') and st.get('bg_mode') != 'page' and float(st.get('bg_opacity') or 0.15) > 0.35:
-            sec_issues.append(_issue('bg_strong', sid, msg=(f'خلفية القسم تحت النص بشفافية {round(float(st["bg_opacity"]) * 100)}%',
-                                                            f'Section background under the text at {round(float(st["bg_opacity"]) * 100)}%'),
+        sbg = BG.of_section(st)
+        if sbg and sbg['asset_id'] and sbg['opacity'] > (0.25 if sbg['layer'] == 'front' else 0.35) and \
+                (sbg['layer'] == 'front' or sbg['area'] == 'section'):
+            pc = round(sbg['opacity'] * 100)
+            sec_issues.append(_issue('bg_strong', sid, msg=(f'صورة خلفية القسم على النص بدرجة ظهور {pc}%',
+                                                            f'Section background image over the text at {pc}%'),
                                      fix=('خفضها إلى 15%', 'Lower it to 15%')))
         blocks = db.blocks(sid)
         if kind == 'table':
@@ -1001,9 +1007,13 @@ class Fixer:
 
     def fix_bg_strong(self, x):
         if x['params'].get('page'):
-            self.lay()['page_bg_opacity'] = 0.08
+            lay = self.lay()
+            lay['page_bg'] = dict(BG.of_page(lay), opacity=0.08)
+            lay['page_bg_id'] = None
         else:
-            st = dict(self.sec(x['sid']).get('style') or {}, bg_opacity=0.15)
+            st = {k: v for k, v in (self.sec(x['sid']).get('style') or {}).items()
+                  if k not in ('bg_id', 'bg_mode', 'bg_opacity', 'bg_fit')}
+            st['bg'] = dict(BG.of_section(self.sec(x['sid']).get('style')), opacity=0.15)
             self.set_sec(x['sid'], style=st)
 
     def fix_toc_missing(self, x):

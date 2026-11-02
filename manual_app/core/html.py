@@ -13,6 +13,7 @@ import re
 import sys
 from html import escape, unescape
 
+from . import backgrounds as BG
 from . import orgchart
 from .db import CONTROL_STATUSES, STATUSES
 from .richtext import clean, lines
@@ -179,18 +180,22 @@ class Renderer:
             self._asset_cache[asset_id] = _b64(a['data'], a['mime']) if a else ''
         return self._asset_cache[asset_id]
 
-    def faded_uri(self, asset_id, opacity, fit='cover'):
-        """A background image at a given opacity: wrapped in a small SVG (CSS cannot fade a page background)."""
-        uri = self.asset_uri(asset_id)
-        if not uri:
+    def bg_uri(self, bg):
+        """The image of a background, turned, mirrored and faded as described."""
+        if not bg or not bg.get('asset_id'):
             return ''
-        if float(opacity or 1) >= 0.999 and fit != 'contain':
-            return uri
-        par = {'cover': 'xMidYMid slice', 'contain': 'xMidYMid meet'}.get(fit, 'xMidYMid slice')
-        svg = (f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1000" height="1000" '
-               f'viewBox="0 0 1000 1000" preserveAspectRatio="none"><image width="1000" height="1000" '
-               f'preserveAspectRatio="{par}" opacity="{float(opacity):.2f}" href="{uri}" xlink:href="{uri}"/></svg>')
-        return 'data:image/svg+xml;base64,' + base64.b64encode(svg.encode()).decode()
+        a = self.db.asset(int(bg['asset_id']))
+        if not a:
+            return ''
+        w, h = a.get('width'), a.get('height')
+        if not w and a['mime'] == 'image/svg+xml':
+            m = re.search(rb'viewBox="[\d.\s-]*?([\d.]+)\s+([\d.]+)"', a['data'][:2000])
+            if m:
+                w, h = float(m.group(1)), float(m.group(2))
+        return BG.image_uri(self.asset_uri(bg['asset_id']), w, h, bg)
+
+    def bg_css(self, bg):
+        return BG.css(bg, self.bg_uri(bg)) if BG.active(bg) else ''
 
     def k(self, html):
         """Marks a piece of text with its length, so the layout check can tell when part of it does not print."""
@@ -360,8 +365,13 @@ class Renderer:
             layers.append(f'url("{self.asset_uri(self.m["logo_id"])}") top {hh * 0.15:.1f}mm {start} 8mm / auto {logo_h:.1f}mm no-repeat')
         if header_bg:
             layers.append(header_bg)
-        if lay.get('page_bg_id'):
-            layers.append(f'url("{self.faded_uri(lay["page_bg_id"], lay.get("page_bg_opacity", 0.06))}") center / cover no-repeat')
+        head_layers = list(layers)        # logo and header drawing: on every page, also those with their own background
+        pbg = BG.of_page(lay)
+        front_css = []
+        if BG.active(pbg) and pbg['layer'] == 'behind':
+            layers.append(self.bg_css(pbg))
+        elif BG.active(pbg):
+            front_css.append(f'.pagedjs_page:not(.pagedjs_cover_page) .pagedjs_pagebox::after{{background:{self.bg_css(pbg)}}}')
         page_bg = ('background:' + ', '.join(layers) + ';') if layers else ''
         head_col = '#ffffff' if hs in ('wave', 'band') else c['primary']
         line_css = f'border-bottom:0.4mm solid {c["primary"]};' if hs == 'line' else ''
@@ -391,27 +401,55 @@ class Renderer:
                 fbox(f'bottom-{start}', ft.get('start', ''), ft_extra), fbox('bottom-center', ft.get('center', ''), ft_extra),
                 fbox(f'bottom-{end}', ft.get('end', ''), ft_extra + f'text-align:{end};')]) + '} .front{page:front}'
         reset = f'.pgreset{{counter-reset:page {int(self.pn.get("start") or 1)}}}' if self.reset_id else ''
-        cover = lay.get('cover') or {}
-        cover_layers = []
-        if cover.get('bg_id'):
-            cover_layers.append(f'url("{self.faded_uri(cover["bg_id"], cover.get("bg_opacity", 1))}") center / cover no-repeat')
-        cover_bg = ('background:' + ', '.join(cover_layers) + ';') if cover_layers else ''
+        cbg = BG.of_cover(lay)
+        cover_bg = ''
+        if BG.active(cbg) and cbg['layer'] == 'behind':
+            cover_bg = f'background:{self.bg_css(cbg)};'
+        elif BG.active(cbg):
+            front_css.append(f'.pagedjs_cover_page .pagedjs_pagebox::after{{background:{self.bg_css(cbg)}}}')
         wm = ''
         if lay.get('watermark'):
             wm = f'.pagedjs_page::after{{content:"{escape(lay["watermark"])}";}}'
         size = f'{pw}mm {ph}mm'
+
+        def turned(name):
+            # Paged.js gives every page the size of the first @page rule: a page of the other orientation gets its
+            # own measures here, so its content is laid out at the turned width
+            return ('.pagedjs_%s_page{--pagedjs-width:%smm;--pagedjs-height:%smm;--pagedjs-pagebox-width:%smm;'
+                    '--pagedjs-pagebox-height:%smm;--pagedjs-width-left:%smm;--pagedjs-width-right:%smm;'
+                    '--pagedjs-height-left:%smm;--pagedjs-height-right:%smm}' % (name, ph, pw, ph, pw, ph, ph, pw, pw))
+        front_css.append(turned('fullL'))
+        AL = {'justify': ('justify', 'justify'), 'start': ('right', 'left'), 'center': ('center', 'center')}.get(
+            lay.get('align', 'justify'), ('justify', 'justify'))
         named = []
         for s, _ in self.db.flat(self.m['id']):
+            sid = s['id']
+            if sid not in self.own_page:
+                continue
             st = s.get('style') or {}
-            if st.get('bg_id') and st.get('bg_mode') == 'page':
-                named.append(f'@page bg{s["id"]}{{background:url("{self.faded_uri(st["bg_id"], st.get("bg_opacity", 0.15), st.get("bg_fit", "cover"))}") center / cover no-repeat;}}'
-                             f'.pg{s["id"]}{{page:bg{s["id"]}}}')
+            sbg = BG.of_section(st)
+            rules = []
+            o = st.get('orientation')
+            if o in ('portrait', 'landscape') and o != lay['orientation']:
+                rules.append(f'size:{ph}mm {pw}mm;')
+                front_css.append(turned(f'sp{sid}'))
+            if BG.active(sbg) and sbg['area'] == 'page' and sbg['layer'] == 'behind':
+                rules.append('background:' + ', '.join(head_layers + [self.bg_css(sbg)]) + ';')
+            elif BG.active(sbg) and sbg['area'] == 'page':
+                front_css.append(f'.pagedjs_sp{sid}_page .pagedjs_pagebox::after{{background:{self.bg_css(sbg)}}}')
+            named.append(f'@page sp{sid}{{{"".join(rules)}}}.pg{sid}{{page:sp{sid}}}')
         return f"""
 {self.font_faces()}
 @page{{size:{size};margin:{mg['top']}mm {mg['right']}mm {mg['bottom']}mm {mg['left']}mm;{page_bg}{margin_boxes}}}
+@page fullP{{size:{pw}mm {ph}mm;margin:0;background:none;@top-left{{content:none}}@top-center{{content:none}}@top-right{{content:none}}
+  @bottom-left{{content:none}}@bottom-center{{content:none}}@bottom-right{{content:none}}}}
+@page fullL{{size:{ph}mm {pw}mm;margin:0;background:none;@top-left{{content:none}}@top-center{{content:none}}@top-right{{content:none}}
+  @bottom-left{{content:none}}@bottom-center{{content:none}}@bottom-right{{content:none}}}}
 @page cover{{margin:0;background:none;{cover_bg}@top-left{{content:none}}@top-center{{content:none}}@top-right{{content:none}}
   @bottom-left{{content:none}}@bottom-center{{content:none}}@bottom-right{{content:none}}}}
 {''.join(named)}
+{''.join(front_css)}
+.pagedjs_pagebox{{position:relative}} .pagedjs_pagebox::after{{content:"";position:absolute;inset:0;pointer-events:none;z-index:20}}
 {front_boxes}
 {reset}
 :root{{--p:{c['primary']};--s:{c['secondary']};--a:{c['accent']};--t:{c['text']};--h:{c['heading']};
@@ -419,7 +457,12 @@ class Renderer:
 html{{font-family:"{f['ar']}","{f['en']}",Tajawal,"MB symbols-2","MB symbols-1","MB symbols-math",Arial,sans-serif;font-size:{f['size']}pt;line-height:{f['line']};color:var(--t)}}
 body{{margin:0}} body.rtl .sec,body.rtl .chapter-page,body.rtl .toc{{direction:rtl}} body.rtl table.t{{direction:rtl}} body.rtl table.t.mirrored{{direction:ltr}}
 .en,.en *{{font-family:"{f['en']}","{f['ar']}","MB symbols-2","MB symbols-1","MB symbols-math",Arial,sans-serif}}
-.ar{{text-align:justify;direction:rtl}} .en{{text-align:justify;direction:ltr}}
+.ar{{text-align:{AL[0]};direction:rtl}} .en{{text-align:{AL[1]};direction:ltr}}
+.al-right .ar,.al-right .en,.figure.al-right{{text-align:right}} .al-left .ar,.al-left .en,.figure.al-left{{text-align:left}}
+.al-center .ar,.al-center .en,.figure.al-center{{text-align:center}} .al-justify .ar,.al-justify .en{{text-align:justify}}
+.fullimg{{break-before:page;break-after:page;display:flex;align-items:center;justify-content:center;overflow:hidden}}
+.fullimg img{{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain}}
+.fullP{{page:fullP;height:{ph}mm;width:{pw}mm}} .fullL{{page:fullL;height:{pw}mm;width:{ph}mm}}
 .pair{{display:grid;grid-template-columns:1fr 1fr;column-gap:7mm;align-items:start}}
 .pair{{direction:ltr;break-inside:avoid}} .keep{{break-inside:avoid}} .pair>.ar{{grid-column:2;grid-row:1}} .pair>.en{{grid-column:1;grid-row:1}}
 .stack>.en{{margin-top:1.5mm;color:#334}}
@@ -463,8 +506,10 @@ table.t .first{{font-weight:700}}
 .toc .row.d2{{padding-inline-start:12mm;font-size:.95em}}
 .toc .dots{{flex:1;border-bottom:0.3mm dotted #98a6bd;transform:translateY(-1mm)}}
 .toc .pg::after{{content:target-counter(attr(data-ref url), page, {self.digits()})}}
-.bg{{position:relative}} .bg>.bgimg{{position:absolute;inset:0;background-size:cover;background-position:center;z-index:0}}
-.bg>.inner{{position:relative;z-index:1}}
+.bg>.frame,.bg.chapter-page{{position:relative}}
+.bgfront>.frame::after,.bgfront.chapter-page::after{{content:"";position:absolute;inset:0;pointer-events:none;z-index:5}}
+{''.join(getattr(self, 'area_rules', []))}
+
 .status{{display:inline-block;font-size:.8em;padding:.3mm 2mm;border-radius:2mm;background:#fff4e0;color:#8a5a00;margin-inline-start:2mm}}
 .draft-mark{{position:relative}} .draft-mark::before{{content:"{self.L('draft')}";position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
   font-size:48pt;font-weight:700;color:rgba(180,35,24,.07);transform:rotate(-18deg);pointer-events:none}}
@@ -513,11 +558,19 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         return html.replace(GLUE, '').replace(PIECE, '')
 
     def _render(self):
+        self.area_rules = []
         flat = self.db.flat(self.m['id'])
         if self.lay.get('numbering'):
             self.number_sections(flat)
         self.flat = flat
         self.skip_cover = False
+        self.own_page = set()          # sections with a page of their own: another orientation or a whole-page background
+        for x, _ in flat:
+            xs = x.get('style') or {}
+            xb = BG.of_section(xs)
+            if (xs.get('orientation') in ('portrait', 'landscape') and xs['orientation'] != self.lay['orientation']) or \
+                    (BG.active(xb) and xb['area'] == 'page'):
+                self.own_page.add(x['id'])
         if self.mode == 'print':
             self.plan_numbering(flat)
         self.needs_symbols = False
@@ -591,6 +644,11 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
     def section(self, s, depth):
         self._sid = s['id']
         kind = s['kind']
+        if kind == 'image' and self.mode == 'print':
+            bl = self.db.blocks(s['id'])
+            if bl and all(b['kind'] == 'image' and (b.get('style') or {}).get('fullpage') for b in bl):
+                # pages that are whole images: no frame or title of their own
+                return f'<div id="s{s["id"]}" data-sid="{s["id"]}">{self.blocks_html(s)}</div>'
         st = s.get('style') or {}
         fn = getattr(self, 'k_' + kind, self.k_text)
         inner = fn(s, depth)
@@ -606,7 +664,7 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         ar, en = escape(s.get('title_ar') or ''), escape(s.get('title_en') or '')
         tbar = '<div class="tbar stitle">' + self.pair(numh + ar + status, numh + en, raw=True) + '</div>'
         if self.mode == 'print' and kind in ('text', 'policy') and not re.sub(r'<[^>]+>|\s', '', inner) \
-                and getattr(self, '_next_child', False) and not st.get('bg_id'):
+                and getattr(self, '_next_child', False) and not BG.active(BG.of_section(st)) and s['id'] not in self.own_page:
             # a title whose content is its sub-sections goes on the page of the first of them
             self._pending += (f'<div class="tbar stitle ptitle lvl{min(depth, 2)}t" id="s{s["id"]}" data-sid="{s["id"]}">'
                               + self.pair(numh + ar + status, numh + en, raw=True) + '</div>')
@@ -617,16 +675,13 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
             classes.append('newpage')
         if s['id'] in self.front_ids:
             classes.append('front')
-        elif st.get('bg_id') and st.get('bg_mode') == 'page':
+        elif s['id'] in self.own_page:
             classes.append(f'pg{s["id"]}')
         if s['id'] == self.reset_id:
             classes.append('pgreset')
         if self.workflow and self.lay.get('draft_mark') and s['status'] != 'approved':
             classes.append('draft-mark')
-        bg = ''
-        if st.get('bg_id') and st.get('bg_mode') != 'page':
-            classes.append('bg')
-            bg = f'<div class="bgimg" style="background-image:url(\'{self.faded_uri(st["bg_id"], st.get("bg_opacity", 0.15), st.get("bg_fit", "cover"))}\')"></div>'
+        bg = self.area_bg(st, classes)
         head = f'{pending}{tbar}<div class="inner">'
         if pending:
             head = f'<div class="keep">{pending}{tbar}</div><div class="inner">'
@@ -637,7 +692,7 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
                 inner = rest
             else:
                 inner = inner.replace(GLUE, '')
-        return (f'<section class="{" ".join(classes)}" id="s{s["id"]}" data-sid="{s["id"]}"><div class="frame">{bg}{head}'
+        return (f'<section class="{" ".join(classes)}" id="s{s["id"]}" data-sid="{s["id"]}"><div class="frame"{bg}>{head}'
                 f'{inner}</div></div></section>')
 
     # kinds -----------------------------------------------------------
@@ -646,11 +701,13 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         cv = self.lay.get('cover') or {}
         rtl = self.lm != 'en'
         wave = ''
-        if cv.get('style', 'wave') == 'wave' and not cv.get('bg_id'):
+        cbg = BG.of_cover(self.lay)
+        plain = not (BG.active(cbg) and cbg['layer'] == 'behind')       # a background behind the text replaces the shape
+        if cv.get('style', 'wave') == 'wave' and plain:
             wave = (f'<svg viewBox="0 0 1000 600" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%">'
                     f'<path d="M0,0 H1000 V330 C760,470 560,250 330,360 C190,430 80,410 0,380 Z" fill="{c["secondary"]}" opacity=".5"/>'
                     f'<path d="M0,0 H1000 V290 C760,420 540,210 320,320 C180,390 70,370 0,340 Z" fill="{c["primary"]}"/></svg>')
-        elif cv.get('style') == 'band' and not cv.get('bg_id'):
+        elif cv.get('style') == 'band' and plain:
             wave = f'<div style="position:absolute;inset:0 0 45% 0;background:{c["primary"]}"></div>'
         logo = (f'<img src="{self.asset_uri(m["logo_id"])}" alt="" style="position:absolute;top:8%;{"right" if rtl else "left"}:6%;height:16%;'
                 'background:#fff;border-radius:3mm;padding:2mm">') if m.get('logo_id') else ''
@@ -658,7 +715,7 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         sub_ar, sub_en = escape(m.get('subtitle_ar') or ''), escape(m.get('subtitle_en') or '')
         ed_ar, ed_en = escape(m.get('edition_ar') or ''), escape(m.get('edition_en') or '')
         org_ar, org_en = escape(m.get('org_ar') or ''), escape(m.get('org_en') or '')
-        dark = '#ffffff' if (cv.get('style', 'wave') in ('wave', 'band') and not cv.get('bg_id')) else c['primary']
+        dark = '#ffffff' if (cv.get('style', 'wave') in ('wave', 'band') and plain) else c['primary']
 
         def side(ar, en, size, color, weight=700):
             if self.lm == 'ar':
@@ -678,13 +735,11 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         num = self.numbers.get(s['id'])
         title = self.pair(((num + ' ') if num else '') + escape(s.get('title_ar') or ''),
                           ((num + ' ') if num else '') + escape(s.get('title_en') or ''), raw=True)
-        cls = f'chapter-page pg{s["id"]}' if st.get('bg_id') and st.get('bg_mode') == 'page' else 'chapter-page'
+        classes = ['chapter-page'] + ([f'pg{s["id"]}'] if s['id'] in self.own_page else [])
         if s['id'] == self.reset_id:
-            cls += ' pgreset'
-        bg = ''
-        if st.get('bg_id') and st.get('bg_mode') != 'page':
-            cls += ' bg'
-            bg = f'<div class="bgimg" style="background-image:url(\'{self.faded_uri(st["bg_id"], st.get("bg_opacity", 0.2), st.get("bg_fit", "cover"))}\')"></div>'
+            classes.append('pgreset')
+        bg = self.area_bg(st, classes)
+        cls = ' '.join(classes)
         body = self.blocks_html(s)
         if not s['new_page']:
             head = f'<h1 class="chap tbar" style="font-size:1.4em">{title}</h1>'
@@ -693,7 +748,25 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
                 head = f'<div class="keep">{head}{first}</div>'
             return (f'<section class="sec lvl0 k-chapter{" pgreset" if s["id"] == self.reset_id else ""}" id="s{s["id"]}" data-sid="{s["id"]}">'
                     f'{head}{body}</section>')
-        return (f'<section class="{cls}" id="s{s["id"]}" data-sid="{s["id"]}">{bg}<div class="inner"><h1 class="chap ctitle">{title}</h1>{body}</div></section>')
+        return (f'<section class="{cls}" id="s{s["id"]}" data-sid="{s["id"]}"{bg}><div class="inner"><h1 class="chap ctitle">{title}</h1>{body}</div></section>')
+
+    def area_bg(self, st, classes):
+        """A background behind (or over) the text of one section only."""
+        bg = BG.of_section(st)
+        if not BG.active(bg) or bg['area'] != 'section':
+            return ''
+        n = len(self.area_rules) + 1
+        classes += ['bg', f'bgr{n}']
+        # a rule of its own on the box itself (not a child), so every page the section runs over carries it. Not a
+        # CSS variable: the browser drops a variable longer than 2 MB, and a photograph easily is.
+        front = bg['layer'] == 'front'
+        if front:
+            classes.append('bgfront')
+            sel = f'.bgr{n}>.frame::after,.bgr{n}.chapter-page::after'
+        else:
+            sel = f'.bgr{n}>.frame,.bgr{n}.chapter-page'
+        self.area_rules.append(f'{sel}{{background:{self.bg_css(bg)}}}')
+        return ''
 
     def k_text(self, s, depth):
         return self.blocks_html(s)
@@ -820,24 +893,26 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
     def block(self, b):
         k, d = b['kind'], b.get('data') or {}
         ar, en = b.get('ar') or '', b.get('en') or ''
+        al = (b.get('style') or {}).get('align')
+        al = f' al-{al}' if al in ('right', 'center', 'left', 'justify') else ''
         if k == 'heading':
-            return self.pair(ar, en, 'h-sub')
+            return self.pair(ar, en, 'h-sub' + al)
         if k == 'paragraph':
-            return self.pair(ar, en, 'blk')
+            return self.pair(ar, en, 'blk' + al)
         if k in ('bullets', 'numbered'):
             tag = 'ul' if k == 'bullets' else 'ol'
             la, le = lines(ar), lines(en)
             if not la and not le:
                 return ''
             if self.lm == 'bi_side' and self.mode == 'print':
-                return PIECE.join(self.pair(ha, he, 'blk', raw=True) for ha, he in self.list_pieces(tag, la, le))
+                return PIECE.join(self.pair(ha, he, 'blk' + al, raw=True) for ha, he in self.list_pieces(tag, la, le))
             ha = f'<{tag}>' + ''.join(f'<li{self.k(clean(x))}>{clean(x)}</li>' for x in la) + f'</{tag}>' if la else ''
             he = f'<{tag}>' + ''.join(f'<li{self.k(clean(x))}>{clean(x)}</li>' for x in le) + f'</{tag}>' if le else ''
-            return self.pair(ha, he, 'blk', raw=True)
+            return self.pair(ha, he, 'blk' + al, raw=True)
         if k == 'callout':
-            return f'<div class="callout">{self.pair(ar, en)}</div>' if (ar or en) else ''
+            return f'<div class="callout{al}">{self.pair(ar, en)}</div>' if (ar or en) else ''
         if k == 'quote':
-            return f'<div class="quote">{self.pair(ar, en)}</div>' if (ar or en) else ''
+            return f'<div class="quote{al}">{self.pair(ar, en)}</div>' if (ar or en) else ''
         if k == 'pagebreak':
             return '<div class="newpage"></div>'
         if k == 'image':
@@ -848,7 +923,12 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
             cap = self.pair(ar, en, 'cap') if (ar or en) else ''
             a = self.db.asset(int(d.get('asset_id')))
             dims = f' width="{a["width"]}" height="{a["height"]}"' if a and a.get('width') and a.get('height') else ''
-            return f'<div class="figure"><img src="{uri}"{dims} alt="" style="width:{width}%;height:auto">{cap}</div>'
+            if (b.get('style') or {}).get('fullpage') and self.mode == 'print':
+                # a whole page of its own (a scanned or imported page): no margins, header or footer
+                wide = bool(a and a.get('width') and a.get('height') and a['width'] > a['height'])
+                same = wide == (self.lay['orientation'] == 'landscape')
+                return f'<div class="fullimg {"fullP" if same else "fullL"}"><img src="{uri}"{dims} alt=""></div>'
+            return f'<div class="figure{al}"><img src="{uri}"{dims} alt="" style="width:{width}%;height:auto">{cap}</div>'
         if k == 'table':
             return self.table_html(d)
         if k == 'links':

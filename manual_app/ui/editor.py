@@ -5,18 +5,18 @@ import os
 
 from PySide6.QtCore import QDate, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut, QTextCharFormat, QTextCursor
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDateEdit, QDialogButtonBox, QFrame, QHBoxLayout, QHeaderView,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDateEdit, QDialogButtonBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
                                QInputDialog, QLabel, QLineEdit, QMenu, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
                                QTableWidget, QTableWidgetItem, QTextEdit, QToolButton, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
 from ..core.db import BLOCK_KINDS, SECTION_KINDS, STATUSES
 from ..core.richtext import clean
-from ..core import doctor
-from ..core.templates import TABLE_PRESETS, layout_with_defaults, policy_blocks, table_data
+from ..core import backgrounds as BG, doctor
+from ..core.templates import BLOCK_ALIGN, TABLE_PRESETS, layout_with_defaults, policy_blocks, table_data
 from .common import L, confirm, error, info
 from .library import asset_pixmap, pick_asset
-from .theme import SizedDialog, a11y, size_tree, button, card, field, fit, form_grid, hint, icon, icon_button, ltr, muted, name_buttons
+from .theme import SizedDialog, a11y, size_tree, button, card, field, fit, form_grid, hint, icon, flow_row, icon_button, ltr, muted, name_buttons
 
 KIND_ICONS = {'cover': 'book', 'disclaimer': 'shield', 'doc_control': 'check', 'toc': 'list', 'chapter': 'folder',
               'text': 'text', 'policy': 'flag', 'table': 'table', 'orgchart': 'org', 'compliance': 'shield',
@@ -304,19 +304,13 @@ class TableEditor(QWidget):
         down.clicked.connect(lambda: self.move_row(1))
         paste = button(L('لصق من Excel', 'Paste from Excel'), 'import')
         paste.clicked.connect(self.paste)
-        r1 = QHBoxLayout()
-        for w in (self.preset, self.lang, self.numbered, self.bold):
-            r1.addWidget(w)
-        r1.addStretch(1)
-        r2 = QHBoxLayout()
-        for w in (cols, addr, delr, up, down, paste):
-            r2.addWidget(w)
-        r2.addStretch(1)
+        self.preset.setMinimumContentsLength(10)
+        self.preset.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addLayout(r1)
+        lay.addWidget(flow_row([self.preset, self.lang, self.numbered, self.bold]))
         lay.addWidget(self.grid)
-        lay.addLayout(r2)
+        lay.addWidget(flow_row([cols, addr, delr, up, down, paste]))
         self.fill()
 
     def fill(self):
@@ -478,6 +472,7 @@ class BlockWidget(QFrame):
     remove = Signal(object)
     move = Signal(object, int)
     focused = Signal(object)
+    insert_after = Signal(object)
 
     def __init__(self, ctx, block):
         super().__init__()
@@ -493,22 +488,28 @@ class BlockWidget(QFrame):
         self.kind.currentIndexChanged.connect(self._kind_changed)
         fit(self.kind, 190)
         a11y(self.kind, L('نوع الكتلة', 'Block type'))
+        self.align = QComboBox()
+        for k, (ar, en) in BLOCK_ALIGN.items():
+            self.align.addItem(L(ar, en), k)
+        self.align.setCurrentIndex(max(0, self.align.findData((block.get('style') or {}).get('align', ''))))
+        self.align.currentIndexChanged.connect(self.changed.emit)
+        fit(self.align, 150)
+        a11y(self.align, L('محاذاة النص', 'Text alignment'))
+        add = icon_button('plus', L('إضافة كتلة بعد هذه الكتلة', 'Add a block after this one'))
+        add.clicked.connect(lambda: self.insert_after.emit(self))
         up = icon_button('up', L('تحريك لأعلى', 'Move up'))
         up.clicked.connect(lambda: self.move.emit(self, -1))
         down = icon_button('down', L('تحريك لأسفل', 'Move down'))
         down.clicked.connect(lambda: self.move.emit(self, 1))
         rm = icon_button('trash', L('حذف الكتلة', 'Delete the block'), 'danger')
         rm.clicked.connect(lambda: self.remove.emit(self))
-        head = QHBoxLayout()
-        head.addWidget(self.kind)
-        head.addStretch(1)
-        for b in (up, down, rm):
-            head.addWidget(b)
+        # every control at the reading start, so a narrow pane never hides them
+        head = flow_row([self.kind, self.align, add, up, down, rm], 6)
         self.body = QVBoxLayout()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 8, 10, 10)
         lay.setSpacing(6)
-        lay.addLayout(head)
+        lay.addWidget(head)
         lay.addLayout(self.body)
         self._build()
 
@@ -553,6 +554,7 @@ class BlockWidget(QFrame):
             self.links.changed.connect(self.changed.emit)
             self.body.addWidget(self.links)
         elif k == 'image':
+            st = self.block.get('style') or {}
             self.thumb = QLabel()
             self.thumb.setFixedSize(QSize(180, 120))
             self.thumb.setAlignment(Qt.AlignCenter)
@@ -562,12 +564,21 @@ class BlockWidget(QFrame):
             self._thumb()
             pick = button(L('اختيار صورة…', 'Choose an image…'), 'image')
             pick.clicked.connect(self._pick)
+            from_pdf = button(L('صفحة من ملف PDF…', 'A page of a PDF file…'), 'pdf')
+            from_pdf.clicked.connect(self._from_pdf)
+            drop = button(L('إزالة الصورة', 'Remove the image'), 'close', 'danger')
+            drop.clicked.connect(self._drop)
             self.width = QSpinBox()
             self.width.setRange(10, 100)
             self.width.setSuffix(' %')
             self.width.setValue(int(d.get('width') or 100))
             self.width.valueChanged.connect(self.changed.emit)
             fit(self.width, 110)
+            self.fullpage = QCheckBox(L('صفحة كاملة (تملأ الورقة دون هوامش، وتأخذ اتجاه الصورة)',
+                                        'A whole page (fills the sheet without margins, turned as the image)'))
+            self.fullpage.setChecked(bool(st.get('fullpage')))
+            self.fullpage.toggled.connect(lambda v: (self.width.setEnabled(not v), self.changed.emit()))
+            self.width.setEnabled(not self.fullpage.isChecked())
             self.cap_ar = QLineEdit(self.block.get('ar') or '')
             self.cap_ar.setPlaceholderText(L('التعليق بالعربية (اختياري)', 'Arabic caption (optional)'))
             self.cap_en = ltr(QLineEdit(self.block.get('en') or ''))
@@ -576,18 +587,16 @@ class BlockWidget(QFrame):
                 e.textChanged.connect(self.changed.emit)
             g = form_grid()
             field(g, 0, 0, L('العرض من عرض الصفحة', 'Width of the page width'), self.width)
-            field(g, 1, 0, L('التعليق بالعربية', 'Arabic caption'), self.cap_ar)
-            field(g, 2, 0, L('التعليق بالإنجليزية', 'English caption'), self.cap_en)
+            g.addWidget(self.fullpage, 1, 0, 1, 2)
+            field(g, 2, 0, L('التعليق بالعربية', 'Arabic caption'), self.cap_ar)
+            field(g, 3, 0, L('التعليق بالإنجليزية', 'English caption'), self.cap_en)
+            self.fullpage.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             g.setColumnStretch(1, 1)
-            col = QVBoxLayout()
-            col.addWidget(self.thumb)
-            col.addWidget(pick)
-            row = QHBoxLayout()
-            row.addLayout(col)
-            row.addLayout(g, 1)
-            self.body.addLayout(row)
+            self.body.addWidget(flow_row([self.thumb, pick, from_pdf, drop]))
+            self.body.addLayout(g)
         elif k == 'pagebreak':
             self.body.addWidget(muted(L('تبدأ الكتلة التالية في صفحة جديدة.', 'The next block starts on a new page.')))
+        self.align.setVisible(k in TEXT_KINDS or k == 'image')
         size_tree(self)
 
     def _thumb(self):
@@ -604,6 +613,36 @@ class BlockWidget(QFrame):
             self._thumb()
             self.changed.emit()
 
+    def _drop(self):
+        self.asset_id = None
+        self._thumb()
+        self.changed.emit()
+
+    def _from_pdf(self):
+        path, _ = QFileDialog.getOpenFileName(self, L('ملف PDF', 'PDF file'), '', 'PDF (*.pdf)')
+        if not path:
+            return
+        from ..core import importer
+        n = importer.pdf_page_count(path) or 9999
+        page, ok = QInputDialog.getInt(self, L('رقم الصفحة', 'Page number'),
+                                       L('رقم الصفحة المطلوبة من الملف', 'The page of the file to use'), 1, 1, n)
+        if not ok:
+            return
+        data = importer.render_pdf_page(path, page, 170)
+        if not data:
+            error(self, L('تعذّرت قراءة هذه الصفحة من الملف.', 'This page of the file cannot be read.'))
+            return
+        from PySide6.QtGui import QImage
+        img = QImage()
+        img.loadFromData(data)
+        name = f'{os.path.splitext(os.path.basename(path))[0]} — {L("صفحة", "page")} {page}.png'
+        self.asset_id = self.db.add_asset(name, data, 'image/png', 'image', img.width(), img.height())
+        if not self.fullpage.isChecked() and confirm(self, L('هل تُعرض الصفحة صفحةً كاملة في الدليل (دون هوامش)؟',
+                                                            'Show the page as a whole page of the manual (no margins)?')):
+            self.fullpage.setChecked(True)
+        self._thumb()
+        self.changed.emit()
+
     def _kind_changed(self):
         cur = self.value()
         new = self.kind.currentData()
@@ -615,7 +654,14 @@ class BlockWidget(QFrame):
 
     def value(self):
         k = self.block.get('kind', 'paragraph')
-        out = {'kind': k, 'ar': '', 'en': '', 'data': {}, 'style': self.block.get('style') or {}}
+        style = dict(self.block.get('style') or {})
+        if self.align.currentData():
+            style['align'] = self.align.currentData()
+        else:
+            style.pop('align', None)
+        if k == 'image':
+            style['fullpage'] = self.fullpage.isChecked()
+        out = {'kind': k, 'ar': '', 'en': '', 'data': {}, 'style': style}
         if self.ar is not None:
             out['ar'], out['en'] = self.ar.value(), self.en.value()
         elif self.table is not None:
@@ -671,26 +717,20 @@ class SectionForm(QWidget):
         self.status = QLabel()
         self.status.setProperty('chip', True)
         a11y(self.status, L('حالة القسم', 'Section status'))
-        # background
+        # page direction and background
+        self.orientation = QComboBox()
+        self.orientation.addItem(L('كإعداد الدليل', 'As the manual'), '')
+        self.orientation.addItem(L('عمودي (Portrait)', 'Portrait'), 'portrait')
+        self.orientation.addItem(L('أفقي (Landscape)', 'Landscape'), 'landscape')
+        fit(self.orientation, 190)
         self.bg_label = QLabel(L('بلا خلفية', 'No background'))
         self.bg_label.setProperty('muted', True)
-        bg_pick = button(L('خلفية…', 'Background…'), 'image')
+        self.bg_label.setWordWrap(True)
+        bg_pick = button(L('الخلفية…', 'Background…'), 'image')
         bg_pick.clicked.connect(self._pick_bg)
         bg_clear = icon_button('close', L('إزالة الخلفية', 'Remove the background'))
         bg_clear.clicked.connect(self._clear_bg)
-        self.bg_mode = QComboBox()
-        self.bg_mode.addItem(L('خلف نص القسم', 'Behind the section text'), 'behind')
-        self.bg_mode.addItem(L('الصفحة كاملة', 'The whole page'), 'page')
-        fit(self.bg_mode, 170)
-        self.bg_opacity = QSpinBox()
-        self.bg_opacity.setRange(3, 100)
-        self.bg_opacity.setSuffix(' %')
-        fit(self.bg_opacity, 100)
-        self.bg_fit = QComboBox()
-        self.bg_fit.addItem(L('تغطية المساحة', 'Cover the area'), 'cover')
-        self.bg_fit.addItem(L('الصورة كاملة', 'Whole image'), 'contain')
-        fit(self.bg_fit, 150)
-        self.bg_id = None
+        self.bg = None
         # policy fields
         self.resp_ar = QLineEdit()
         self.resp_ar.setPlaceholderText(L('مثلاً: مدير الموارد البشرية', 'e.g. مدير الموارد البشرية'))
@@ -712,32 +752,19 @@ class SectionForm(QWidget):
         fit(self.toc_depth, 90)
 
         g = form_grid()
-        field(g, 0, 0, L('العنوان بالعربية', 'Arabic title'), self.title_ar, 3)
-        field(g, 1, 0, L('العنوان بالإنجليزية', 'English title'), self.title_en, 3)
+        field(g, 0, 0, L('العنوان بالعربية', 'Arabic title'), self.title_ar)
+        field(g, 1, 0, L('العنوان بالإنجليزية', 'English title'), self.title_en)
         field(g, 2, 0, L('نوع القسم', 'Section type'), self.kind)
-        field(g, 2, 2, L('الرمز', 'Code'), self.code)
-        flags = QHBoxLayout()
-        flags.addWidget(self.new_page)
-        flags.addWidget(self.in_toc)
-        flags.addStretch(1)
-        flags.addWidget(self.status)
-        g.addLayout(flags, 3, 1, 1, 3)
-        field(g, 4, 0, L('موعد المراجعة القادمة', 'Next review'), self.next_review)
+        field(g, 3, 0, L('الرمز', 'Code'), self.code)
+        g.addWidget(flow_row([self.new_page, self.in_toc, self.status]), 4, 1)
+        field(g, 5, 0, L('موعد المراجعة القادمة', 'Next review'), self.next_review)
+        field(g, 6, 0, L('اتجاه صفحات القسم', 'Page direction'), self.orientation)
         bgr = QHBoxLayout()
-        for w in (bg_pick, bg_clear, self.bg_label):
-            bgr.addWidget(w)
-        bgr.addStretch(1)
-        field(g, 5, 0, L('الخلفية', 'Background'), bgr, 3)
-        bgr2 = QHBoxLayout()
-        for w in (self.bg_mode, self.bg_opacity, self.bg_fit):
-            bgr2.addWidget(w)
-        bgr2.addStretch(1)
-        g.addLayout(bgr2, 6, 1, 1, 3)
-        a11y(self.bg_mode, L('مكان الخلفية', 'Where the background goes'))
-        a11y(self.bg_opacity, L('شفافية الخلفية', 'Background opacity'))
-        a11y(self.bg_fit, L('ملاءمة الخلفية', 'Background fit'))
+        bgr.addWidget(bg_pick)
+        bgr.addWidget(bg_clear)
+        bgr.addWidget(self.bg_label, 1)
+        field(g, 7, 0, L('الخلفية', 'Background'), bgr)
         g.setColumnStretch(1, 1)
-        g.setColumnStretch(3, 1)
         self.policy_box = card(L('بيانات السياسة', 'Policy details'))
         pg = form_grid()
         field(pg, 0, 0, L('المسؤول عن المتابعة والتحديث (عربي)', 'Responsible to maintain & update (Arabic)'), self.resp_ar)
@@ -778,9 +805,9 @@ class SectionForm(QWidget):
             w.textChanged.connect(self.changed.emit)
         for w in (self.new_page, self.in_toc):
             w.toggled.connect(self.changed.emit)
-        for w in (self.kind, self.bg_mode, self.bg_fit, self.org_root, self.ctrl_policy):
+        for w in (self.kind, self.orientation, self.org_root, self.ctrl_policy):
             w.currentIndexChanged.connect(self.changed.emit)
-        for w in (self.bg_opacity, self.org_depth, self.toc_depth):
+        for w in (self.org_depth, self.toc_depth):
             w.valueChanged.connect(self.changed.emit)
         self.next_review.dateChanged.connect(self.changed.emit)
         self.kind.currentIndexChanged.connect(self._kind_boxes)
@@ -788,7 +815,7 @@ class SectionForm(QWidget):
     def load(self, s):
         self.section = s
         widgets = (self.title_ar, self.title_en, self.kind, self.code, self.new_page, self.in_toc, self.next_review,
-                   self.bg_mode, self.bg_opacity, self.bg_fit, self.resp_ar, self.resp_en, self.effective,
+                   self.orientation, self.resp_ar, self.resp_en, self.effective,
                    self.org_root, self.org_depth, self.ctrl_policy, self.toc_depth)
         for w in widgets:
             w.blockSignals(True)
@@ -803,10 +830,8 @@ class SectionForm(QWidget):
         else:
             self.next_review.setDate(self.next_review.minimumDate())
         st = s.get('style') or {}
-        self.bg_id = st.get('bg_id')
-        self.bg_mode.setCurrentIndex(max(0, self.bg_mode.findData(st.get('bg_mode', 'behind'))))
-        self.bg_opacity.setValue(int(float(st.get('bg_opacity', 0.15)) * 100))
-        self.bg_fit.setCurrentIndex(max(0, self.bg_fit.findData(st.get('bg_fit', 'cover'))))
+        self.bg = BG.of_section(st)
+        self.orientation.setCurrentIndex(max(0, self.orientation.findData(st.get('orientation', ''))))
         self._bg_text()
         meta = s.get('meta') or {}
         self.resp_ar.setText(meta.get('responsible_ar') or '')
@@ -849,21 +874,26 @@ class SectionForm(QWidget):
         self.table_box.setVisible(k == 'table' and self.table is not None)
 
     def _bg_text(self):
-        if self.bg_id:
-            a = self.db.asset(self.bg_id)
-            self.bg_label.setText(a['name'] if a else L('بلا خلفية', 'No background'))
-        else:
-            self.bg_label.setText(L('بلا خلفية', 'No background'))
+        a = self.db.asset(self.bg['asset_id']) if self.bg and self.bg.get('asset_id') else None
+        self.bg_label.setText(BG.summary(self.bg, L, a['name'] if a else None))
+
+    def _landscape(self):
+        o = self.orientation.currentData()
+        if not o:
+            lay = layout_with_defaults((self.db.manual(self.section['manual_id']) or {}).get('layout'))
+            o = lay.get('orientation', 'portrait')
+        return o == 'landscape'
 
     def _pick_bg(self):
-        aid = pick_asset(self, self.db, 'background', L('خلفية القسم', 'Section background'))
-        if aid:
-            self.bg_id = aid
+        from .background import edit_background
+        ok, bg = edit_background(self, self.db, self.bg, L('خلفية القسم', 'Section background'), True, self._landscape())
+        if ok:
+            self.bg = bg
             self._bg_text()
             self.changed.emit()
 
     def _clear_bg(self):
-        self.bg_id = None
+        self.bg = None
         self._bg_text()
         self.changed.emit()
 
@@ -882,8 +912,12 @@ class SectionForm(QWidget):
         nr = self.next_review.date()
         meta = dict(s.get('meta') or {}, responsible_ar=self.resp_ar.text().strip(), responsible_en=self.resp_en.text().strip(),
                     effective_date=self.effective.text().strip())
-        style = dict(s.get('style') or {}, bg_id=self.bg_id, bg_mode=self.bg_mode.currentData(),
-                     bg_opacity=self.bg_opacity.value() / 100, bg_fit=self.bg_fit.currentData())
+        style = {k: v for k, v in (s.get('style') or {}).items() if k not in ('bg_id', 'bg_mode', 'bg_opacity', 'bg_fit')}
+        style['bg'] = self.bg
+        if self.orientation.currentData():
+            style['orientation'] = self.orientation.currentData()
+        else:
+            style.pop('orientation', None)
         return {'title_ar': self.title_ar.text().strip(), 'title_en': self.title_en.text().strip(), 'kind': k,
                 'code': self.code.text().strip(), 'new_page': int(self.new_page.isChecked()),
                 'in_toc': int(self.in_toc.isChecked()),
@@ -993,11 +1027,7 @@ class EditorTab(QWidget):
         imp.clicked.connect(self.import_here)
         dele = icon_button('trash', L('حذف الأقسام المحددة', 'Delete the selected sections'), 'danger')
         dele.clicked.connect(self.delete_sections)
-        tb = QHBoxLayout()
-        tb.setSpacing(4)
-        for w in (add, sub, up, down, outd, imp, dele):
-            tb.addWidget(w)
-        tb.addStretch(1)
+        tb = flow_row([add, sub, up, down, outd, imp, dele], 4)
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
@@ -1005,7 +1035,7 @@ class EditorTab(QWidget):
         sr.addWidget(self.search, 1)
         sr.addWidget(self.count)
         ll.addLayout(sr)
-        ll.addLayout(tb)
+        ll.addWidget(tb)
         ll.addWidget(self.tree, 1)
 
         # middle: the section
@@ -1015,7 +1045,7 @@ class EditorTab(QWidget):
         self.block_list = QVBoxLayout()
         self.block_list.setSpacing(8)
         add_block = button(L('إضافة كتلة', 'Add a block'), 'plus')
-        add_block.clicked.connect(self._add_block_menu)
+        add_block.clicked.connect(lambda: self._add_block_menu())
         self.save_btn = button(L('حفظ', 'Save'), 'save', 'primary', tip='Ctrl+S')
         self.save_btn.clicked.connect(self.save)
         self.rev_btn = button(L('إصدار جديد…', 'New version…'), 'flag',
@@ -1032,19 +1062,19 @@ class EditorTab(QWidget):
                                 tip=L('يفحص الدليل كاملاً: الهوامش والجداول واتجاه النص والقوائم والرموز وفواصل الصفحات وأرقامها',
                                       'Checks the whole manual: margins, tables, text direction, lists, symbols, page breaks and numbers'))
         self.check_btn.clicked.connect(lambda: self.ctx.window and self.ctx.window.open_doctor(run=True))
-        actions = QHBoxLayout()
-        for w in (self.save_btn, self.rev_btn, self.wf_review, self.wf_approve, self.wf_back, self.check_btn):
-            actions.addWidget(w)
-        actions.addStretch(1)
-        actions.addWidget(self.saved_label)
+        self.preview_btn = button(L('المعاينة', 'Preview'), 'preview', tip=L('إظهار المعاينة أو إخفاؤها لتتسع مساحة التحرير',
+                                                                       'Show or hide the preview to widen the editing area'))
+        self.preview_btn.setCheckable(True)
+        self.preview_btn.setChecked(True)
+        self.preview_btn.toggled.connect(self._toggle_preview)
+        actions = flow_row([self.save_btn, self.rev_btn, self.wf_review, self.wf_approve, self.wf_back, self.check_btn,
+                            self.preview_btn, self.saved_label])
         content = QWidget()
         cl = QVBoxLayout(content)
         cl.setContentsMargins(4, 0, 4, 10)
-        cl.addLayout(actions)
         cl.addWidget(self.form)
         blocks_box = card(L('المحتوى', 'Content'))
         bl = QVBoxLayout(blocks_box)
-        bl.addWidget(self.fmt)
         bl.addLayout(self.block_list)
         bl.addWidget(add_block, 0, Qt.AlignLeading)
         self.blocks_box = blocks_box
@@ -1052,7 +1082,8 @@ class EditorTab(QWidget):
         cl.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(560)
+        scroll.setMinimumWidth(420)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)     # the content follows the pane width
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(content)
         self.empty = QLabel(L('اختر قسماً من القائمة لتعديله، أو أضف قسماً جديداً.', 'Choose a section from the list to edit it, or add a new one.'))
@@ -1061,6 +1092,16 @@ class EditorTab(QWidget):
         mid = QWidget()
         ml = QVBoxLayout(mid)
         ml.setContentsMargins(0, 0, 0, 0)
+        ml.addWidget(actions)
+        # the formatting bar stays above the content, whichever block is being written
+        fmt_box = QFrame()
+        fmt_box.setObjectName('fmtbar')
+        fmt_box.setStyleSheet('QFrame#fmtbar{background:#f1f5fb;border:1px solid #d5deea;border-radius:8px}')
+        fl = QHBoxLayout(fmt_box)
+        fl.setContentsMargins(6, 3, 6, 3)
+        fl.addWidget(self.fmt)
+        self.fmt_box = fmt_box
+        ml.addWidget(fmt_box)
         ml.addWidget(self.empty)
         ml.addWidget(scroll, 1)
         self.scroll = scroll
@@ -1080,7 +1121,9 @@ class EditorTab(QWidget):
         split.setStretchFactor(0, 2)
         split.setStretchFactor(1, 5)
         split.setStretchFactor(2, 4)
-        split.setSizes([290, 820, 430])
+        split.setSizes([260, 900, 380])
+        split.setCollapsible(1, False)
+        self.split = split
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 0, 10, 10)
         self.title = QLabel()
@@ -1154,7 +1197,13 @@ class EditorTab(QWidget):
 
     def _show_editor(self, on):
         self.scroll.setVisible(on)
+        self.fmt_box.setVisible(on)
         self.empty.setVisible(not on)
+
+    def _toggle_preview(self, on):
+        self.preview.setVisible(on)
+        if on:
+            self.refresh_preview(force=True)
 
     def _open(self, cur, prev):
         if self.dirty and self.sid:
@@ -1215,6 +1264,7 @@ class EditorTab(QWidget):
         w.changed.connect(self._touch)
         w.remove.connect(self._remove_block)
         w.move.connect(self._move_block)
+        w.insert_after.connect(lambda src: self._add_block_menu(self.blocks.index(src) + 1))
         w.focused.connect(self.fmt.set_target)
         if at is None:
             self.block_list.addWidget(w)
@@ -1255,16 +1305,16 @@ class EditorTab(QWidget):
         if self.ctx.window and not quiet:
             self.ctx.window.statusBar().showMessage(L('حُفظ القسم', 'Section saved'), 2500)
 
-    def _add_block_menu(self):
+    def _add_block_menu(self, at=None):
         m = QMenu(self)
         for k, (ar, en) in BLOCK_KINDS.items():
             a = m.addAction(icon(_block_icon(k), '#64748b'), L(ar, en))
-            a.triggered.connect(lambda _=False, kk=k: self.add_block(kk))
+            a.triggered.connect(lambda _=False, kk=k: self.add_block(kk, at))
         m.exec(self.cursor().pos())
 
-    def add_block(self, kind):
+    def add_block(self, kind, at=None):
         b = {'kind': kind, 'ar': '', 'en': '', 'data': table_data('custom') if kind == 'table' else {}}
-        w = self._append_block(b)
+        w = self._append_block(b, at)
         self._touch()
         QTimer.singleShot(50, lambda: self.scroll.ensureWidgetVisible(w))
 
@@ -1443,6 +1493,9 @@ class EditorTab(QWidget):
 
     def refresh_preview(self, force=False):
         if not self.mid or (not force and not self.preview.auto.isChecked()):
+            return
+        if not self.isVisible() or not self.preview.isVisible() and not self.preview_btn.isChecked():
+            self._pending_preview = self.isVisible() is False
             return
         if not self.isVisible():
             self._pending_preview = True           # drawn when the editor is shown
