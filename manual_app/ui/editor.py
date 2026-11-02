@@ -628,7 +628,7 @@ class BlockWidget(QFrame):
         self._clear()
         k = self.block.get('kind', 'paragraph')
         d = self.block.get('data') or {}
-        self.ar = self.en = self.table = self.links = None
+        self.ar = self.en = self.table = self.links = self.orient = None
         if k in TEXT_KINDS:
             (par, pen) = PLACEHOLDERS[k]
             self.ar = RichEdit(True, L(*par))
@@ -699,7 +699,19 @@ class BlockWidget(QFrame):
             self.body.addWidget(flow_row([self.thumb, pick, from_pdf, drop]))
             self.body.addLayout(g)
         elif k == 'pagebreak':
-            self.body.addWidget(muted(L('تبدأ الكتلة التالية في صفحة جديدة.', 'The next block starts on a new page.')))
+            from .inspector import ORIENTS
+            self.orient = QComboBox()
+            for key, (ar, en) in ORIENTS.items():
+                self.orient.addItem(L(ar, en), key)
+            self.orient.setCurrentIndex(max(0, self.orient.findData((self.block.get('style') or {}).get('orient', ''))))
+            self.orient.currentIndexChanged.connect(self.changed.emit)
+            fit(self.orient, 160)
+            g = form_grid()
+            field(g, 0, 0, L('اتجاه الصفحات بعده', 'Direction of the pages after it'), self.orient)
+            g.setColumnStretch(2, 1)
+            self.body.addWidget(muted(L('تبدأ الكتلة التالية في صفحة جديدة. اختر «أفقي» أو «عمودي» لتغيير اتجاه الصفحات التالية حتى الفاصل القادم.',
+                                        'The next block starts on a new page. Choose «Landscape» or «Portrait» to turn the next pages, up to the next break.')))
+            self.body.addLayout(g)
         self.align.setVisible(k in TEXT_KINDS or k == 'image')
         size_tree(self)
 
@@ -765,6 +777,11 @@ class BlockWidget(QFrame):
             style.pop('align', None)
         if k == 'image':
             style['fullpage'] = self.fullpage.isChecked()
+        if k == 'pagebreak' and getattr(self, 'orient', None) is not None:
+            if self.orient.currentData():
+                style['orient'] = self.orient.currentData()
+            else:
+                style.pop('orient', None)
         out = {'kind': k, 'ar': '', 'en': '', 'data': {}, 'style': style}
         if self.ar is not None:
             out['ar'], out['en'] = self.ar.value(), self.en.value()
@@ -1035,13 +1052,19 @@ class SectionForm(QWidget):
 # a click on the pages names what was clicked; the page script reports it through the console
 PICK_JS = r"""
 (function(){if(window.__mbPick)return;window.__mbPick=1;
-var st=document.createElement('style');st.textContent='[data-b]:hover,[data-sid]:hover>.frame{outline:2px dashed #0C67EC;outline-offset:1px;cursor:pointer}'
- +'.pagedjs_margin:hover{outline:2px dashed #F28C28;cursor:pointer}';document.head.appendChild(st);
+var st=document.createElement('style');st.textContent='[data-b]:hover,[data-cv]:hover,[data-sid]:hover>.frame{outline:2px dashed #0C67EC;outline-offset:1px;cursor:pointer}'
+ +'.pagedjs_margin:hover{outline:2px dashed #F28C28;cursor:pointer} .mb-picked{outline:2px solid #F28C28 !important;outline-offset:1px}';
+document.head.appendChild(st);
+function mark(el){document.querySelectorAll('.mb-picked').forEach(function(x){x.classList.remove('mb-picked')});if(el)el.classList.add('mb-picked');}
 document.addEventListener('click',function(e){var t=e.target,side=t.closest('.en')?'en':'ar';
- var b=t.closest('[data-b]');if(b){console.log('MBPICK b '+b.getAttribute('data-b')+' '+side);return;}
- var s=t.closest('[data-sid]');if(s){console.log('MBPICK s '+s.getAttribute('data-sid'));return;}
- var m=t.closest('.pagedjs_margin');if(m){console.log('MBPICK m '+(m.className.indexOf('bottom')>=0?'footer':'header'));return;}
- var p=t.closest('.pagedjs_page');if(p){console.log('MBPICK p '+(p.classList.contains('pagedjs_cover_page')?'cover':'page'));}
+ var c=t.closest('[data-cv]');if(c){mark(c);console.log('MBPICK c '+c.getAttribute('data-cv'));return;}
+ if(t.closest('.cover')){mark(t.closest('.cover'));console.log('MBPICK p cover');return;}
+ var b=t.closest('[data-b]');if(b){mark(b);console.log('MBPICK b '+b.getAttribute('data-b')+' '+side);return;}
+ var m=t.closest('.pagedjs_margin');if(m){mark(m);console.log('MBPICK m '+(m.className.indexOf('bottom')>=0?'footer':'header'));return;}
+ var p=t.closest('.pagedjs_page');
+ if(p){var bs=p.querySelectorAll('[data-b]');mark(p.querySelector('.pagedjs_pagebox'));
+  if(e.clientY<p.querySelector('.pagedjs_area').getBoundingClientRect().top){console.log('MBPICK m header');return;}
+  console.log('MBPICK p page '+(bs.length?bs[0].getAttribute('data-b'):'')+' '+(bs.length?bs[bs.length-1].getAttribute('data-b'):''));return;}
 },true);})();
 """
 
@@ -1084,7 +1107,12 @@ class Preview(QWidget):
         self.lay = QVBoxLayout(self)
         self.lay.setContentsMargins(0, 0, 0, 0)
         self.lay.addLayout(top)
-        self.holder = QLabel(L('تظهر هنا صفحات الدليل كما ستُطبع.', 'The manual pages show here as they will print.'))
+        from .inspector import Inspector
+        self.inspector = Inspector(ctx)
+        self.inspector.setMaximumHeight(420)
+        self.lay.addWidget(self.inspector)
+        self.holder = QLabel(L('تظهر هنا صفحات الدليل كما ستُطبع. اضغط على أي جزء منها لتغييره.',
+                               'The manual pages show here as they will print. Click any part to change it.'))
         self.holder.setAlignment(Qt.AlignCenter)
         self.holder.setProperty('muted', True)
         self.lay.addWidget(self.holder, 1)
@@ -1267,6 +1295,9 @@ class EditorTab(QWidget):
         self.preview = Preview(ctx)
         self.preview.refresh_btn.clicked.connect(lambda: self.refresh_preview(force=True))
         self.preview.picked.connect(self.picked)
+        self.preview.inspector.changed.connect(self._inspected)
+        self.preview.inspector.before_change = lambda: self.dirty and self.save(quiet=True)
+        self.preview.inspector.open_block.connect(lambda sid, i: self.goto(sid, i))
         self.preview.scope.currentIndexChanged.connect(lambda: self.refresh_preview(force=True))
         self._ptimer = QTimer(self)
         self._ptimer.setSingleShot(True)
@@ -1506,19 +1537,40 @@ class EditorTab(QWidget):
         self._touch()
 
     def picked(self, what):
-        """A click on the preview: the block (or section) opens here, the header, footer or cover in the design."""
+        """A click on the preview: its settings open on the preview itself; a block also opens here for its text."""
+        if self.dirty:
+            self.save(quiet=True)
         parts = what.split()
         try:
             if parts[0] == 'b':
                 sid, i = parts[1].split(':')
-                self.goto(int(sid), int(i) if i else None, [parts[2]] if len(parts) > 2 else None)
-            elif parts[0] == 's':
+                if int(sid) != self.sid:
+                    self.goto(int(sid), int(i) if i else None, [parts[2]] if len(parts) > 2 else None)
+            elif parts[0] == 's' and int(parts[1]) != self.sid:
                 self.goto(int(parts[1]))
-            elif self.ctx.window:
-                self.ctx.window.open_design({'header': 'header', 'footer': 'header', 'cover': 'background',
-                                             'page': 'background'}.get(parts[1], 'page'))
         except (IndexError, ValueError):
-            return
+            pass
+        self.preview.inspector.show_for(what)
+        self._widen_preview()
+
+    def _widen_preview(self):
+        """The panel needs room: the preview column grows to at least 560 pixels (the tree gives way first)."""
+        sizes = self.split.sizes()
+        if len(sizes) == 3 and sizes[2] < 560:
+            need = 560 - sizes[2]
+            take_tree = min(need, max(0, sizes[0] - 200))
+            sizes = [sizes[0] - take_tree, max(420, sizes[1] - (need - take_tree)), 560]
+            self.split.setSizes(sizes)
+
+    def _inspected(self, sid):
+        """The panel on the preview changed something: what is open here is drawn again from the saved data."""
+        if sid and sid == self.sid:
+            self.dirty = False
+            keep, self.sid = self.sid, None
+            self.reload_tree(select=keep)
+        if not sid and self.ctx.window:
+            self.ctx.window.design.load_manual(self.mid, keep_history=True)
+        self.refresh_preview(force=True)
 
     def _design_table_colors(self):
         m = self.db.manual(self.mid) if self.mid else None

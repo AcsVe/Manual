@@ -144,6 +144,11 @@ def assets_dir():
     return os.path.join(app_root(), 'assets')
 
 
+def _hex(v):
+    """A colour «#RRGGBB» as given, or None."""
+    return v if isinstance(v, str) and re.fullmatch(r'#[0-9a-fA-F]{6}', v) else None
+
+
 def _b64(data, mime):
     return f'data:{mime};base64,' + base64.b64encode(data).decode()
 
@@ -337,7 +342,9 @@ class Renderer:
         return '\n'.join(css)
 
     def wave_svg(self, height_mm, flip=False, full=False):
-        c = self.lay['colors']
+        hd = self.lay['header']
+        c = dict(self.lay['colors'], primary=_hex(hd.get('color1')) or self.lay['colors']['primary'],
+                 secondary=_hex(hd.get('color2')) or self.lay['colors']['secondary'])
         w, h = 1000, 100
         p1 = 'M0,0 H1000 V55 C780,105 560,20 330,62 C190,88 80,70 0,52 Z'
         p2 = 'M0,0 H1000 V38 C760,88 540,8 320,48 C180,72 70,58 0,40 Z'
@@ -361,7 +368,8 @@ class Renderer:
         if hs == 'wave':
             header_bg = f'url("{self.wave_svg(hh, flip=rtl)}") top left / 100% {hh}mm no-repeat'
         elif hs == 'band':
-            header_bg = f'linear-gradient({c["primary"]},{c["primary"]}) top left / 100% {hh * 0.55:.1f}mm no-repeat'
+            band = _hex(hd.get('color1')) or c['primary']
+            header_bg = f'linear-gradient({band},{band}) top left / 100% {hh * 0.55:.1f}mm no-repeat'
         elif hs == 'image' and hd.get('image_id'):
             header_bg = f'url("{self.asset_uri(hd["image_id"])}") top center / 100% {hh}mm no-repeat'
         layers = []
@@ -378,7 +386,7 @@ class Renderer:
         elif BG.active(pbg):
             front_css.append(f'.pagedjs_page:not(.pagedjs_cover_page) .pagedjs_pagebox::after{{background:{self.bg_css(pbg)}}}')
         page_bg = ('background:' + ', '.join(layers) + ';') if layers else ''
-        head_col = '#ffffff' if hs in ('wave', 'band') else c['primary']
+        head_col = _hex(hd.get('text_color')) or ('#ffffff' if hs in ('wave', 'band') else c['primary'])
         line_css = f'border-bottom:0.4mm solid {c["primary"]};' if hs == 'line' else ''
         foot_line = f'border-top:0.3mm solid {c["box_border"]};' if ft.get('style') == 'line' else ''
 
@@ -388,7 +396,7 @@ class Renderer:
                 return ''
             return f'@{pos}{{content:{content};{extra}}}'
         hd_extra = f'color:{head_col};font-size:8.5pt;font-weight:700;vertical-align:top;padding-top:{hh * 0.18:.1f}mm;{line_css}'
-        ft_extra = f'color:#55607a;font-size:8pt;vertical-align:middle;{foot_line}'
+        ft_extra = f'color:{_hex(ft.get("text_color")) or "#55607a"};font-size:8pt;vertical-align:middle;{foot_line}'
         margin_boxes = ''.join([
             box(f'top-{start}', hd.get('start', ''), hd_extra), box('top-center', hd.get('center', ''), hd_extra),
             box(f'top-{end}', hd.get('end', ''), hd_extra + f'text-align:{end};'),
@@ -424,6 +432,9 @@ class Renderer:
                     '--pagedjs-pagebox-height:%smm;--pagedjs-width-left:%smm;--pagedjs-width-right:%smm;'
                     '--pagedjs-height-left:%smm;--pagedjs-height-right:%smm}' % (name, ph, pw, ph, pw, ph, ph, pw, pw))
         front_css.append(turned('fullL'))
+        front_css.append(turned('oriT'))
+        named_runs = (f'@page oriT{{size:{ph}mm {pw}mm}} @page oriN{{size:{pw}mm {ph}mm}} '
+                      '.pgoT{page:oriT} .pgoN{page:oriN}')
         AL = {'justify': ('justify', 'justify'), 'start': ('right', 'left'), 'center': ('center', 'center')}.get(
             lay.get('align', 'justify'), ('justify', 'justify'))
         named = []
@@ -453,6 +464,7 @@ class Renderer:
 @page cover{{margin:0;background:none;{cover_bg}@top-left{{content:none}}@top-center{{content:none}}@top-right{{content:none}}
   @bottom-left{{content:none}}@bottom-center{{content:none}}@bottom-right{{content:none}}}}
 {''.join(named)}
+{named_runs}
 {''.join(front_css)}
 .pagedjs_pagebox{{position:relative}} .pagedjs_pagebox::after{{content:"";position:absolute;inset:0;pointer-events:none;z-index:20}}
 {front_boxes}
@@ -702,39 +714,56 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
                 f'{inner}</div></div></section>')
 
     # kinds -----------------------------------------------------------
+    COVER_ITEMS = {'title': 30, 'subtitle': 15, 'org': 14, 'edition': 12}
+
     def k_cover(self, s, depth):
         m, c = self.m, self.lay['colors']
         cv = self.lay.get('cover') or {}
+        items = cv.get('items') or {}
         rtl = self.lm != 'en'
         wave = ''
         cbg = BG.of_cover(self.lay)
         plain = not (BG.active(cbg) and cbg['layer'] == 'behind')       # a background behind the text replaces the shape
-        if cv.get('style', 'wave') == 'wave' and plain:
-            wave = (f'<svg viewBox="0 0 1000 600" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%">'
-                    f'<path d="M0,0 H1000 V330 C760,470 560,250 330,360 C190,430 80,410 0,380 Z" fill="{c["secondary"]}" opacity=".5"/>'
-                    f'<path d="M0,0 H1000 V290 C760,420 540,210 320,320 C180,390 70,370 0,340 Z" fill="{c["primary"]}"/></svg>')
-        elif cv.get('style') == 'band' and plain:
-            wave = f'<div style="position:absolute;inset:0 0 45% 0;background:{c["primary"]}"></div>'
-        logo = (f'<img src="{self.asset_uri(m["logo_id"])}" alt="" style="position:absolute;top:8%;{"right" if rtl else "left"}:6%;height:16%;'
-                'background:#fff;border-radius:3mm;padding:2mm">') if m.get('logo_id') else ''
-        title_ar, title_en = escape(m.get('title_ar') or ''), escape(m.get('title_en') or '')
-        sub_ar, sub_en = escape(m.get('subtitle_ar') or ''), escape(m.get('subtitle_en') or '')
-        ed_ar, ed_en = escape(m.get('edition_ar') or ''), escape(m.get('edition_en') or '')
-        org_ar, org_en = escape(m.get('org_ar') or ''), escape(m.get('org_en') or '')
-        dark = '#ffffff' if (cv.get('style', 'wave') in ('wave', 'band') and plain) else c['primary']
+        style = cv.get('style', 'wave')
+        c1, c2 = _hex(cv.get('shape1')) or c['primary'], _hex(cv.get('shape2')) or c['secondary']
+        if style == 'wave' and plain:
+            wave = (f'<svg data-cv="shape" viewBox="0 0 1000 600" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%">'
+                    f'<path d="M0,0 H1000 V330 C760,470 560,250 330,360 C190,430 80,410 0,380 Z" fill="{c2}" opacity=".5"/>'
+                    f'<path d="M0,0 H1000 V290 C760,420 540,210 320,320 C180,390 70,370 0,340 Z" fill="{c1}"/></svg>')
+        elif style == 'band' and plain:
+            wave = f'<div data-cv="shape" style="position:absolute;inset:0 0 45% 0;background:{c1}"></div>'
+        on_shape = style in ('wave', 'band') and plain
+        logo = ''
+        if m.get('logo_id') and not (items.get('logo') or {}).get('hidden'):
+            lh = int((items.get('logo') or {}).get('size') or 16)
+            logo = (f'<img data-cv="logo" src="{self.asset_uri(m["logo_id"])}" alt="" style="position:absolute;top:8%;'
+                    f'{"right" if rtl else "left"}:6%;height:{lh}%;background:#fff;border-radius:3mm;padding:2mm">')
+        default_color = {'title': '#ffffff' if on_shape else c['primary'], 'subtitle': '#ffffff' if on_shape else c['primary'],
+                         'org': c['primary'], 'edition': c['text']}
+        weight = {'title': 700, 'subtitle': 400, 'org': 700, 'edition': 400}
+        fields = {'title': ('title_ar', 'title_en'), 'subtitle': ('subtitle_ar', 'subtitle_en'), 'org': ('org_ar', 'org_en'),
+                  'edition': ('edition_ar', 'edition_en')}
 
-        def side(ar, en, size, color, weight=700):
-            if self.lm == 'ar':
-                return f'<div style="font-size:{size}pt;font-weight:{weight};color:{color}">{ar}</div>'
-            if self.lm == 'en':
-                return f'<div dir="ltr" style="font-size:{size}pt;font-weight:{weight};color:{color}">{en or ar}</div>'
-            return (f'<div style="display:flex;direction:ltr;justify-content:space-between;gap:10mm;font-size:{size}pt;font-weight:{weight};color:{color}">'
+        def part(key):
+            it = items.get(key) or {}
+            ar, en = (escape(m.get(f) or '') for f in fields[key])
+            if it.get('hidden') or not (ar or en):
+                return ''
+            size = float(it.get('size') or self.COVER_ITEMS[key])
+            color = _hex(it.get('color')) or default_color[key]
+            w = 700 if it.get('bold', weight[key] == 700) else 400
+            look = f'font-size:{size}pt;font-weight:{w};color:{color}'
+            if self.lm == 'ar' or (ar and not en):
+                return f'<div data-cv="{key}" style="{look}">{ar}</div>'
+            if self.lm == 'en' or not ar:
+                return f'<div data-cv="{key}" dir="ltr" style="{look}">{en or ar}</div>'
+            return (f'<div data-cv="{key}" style="display:flex;direction:ltr;justify-content:space-between;gap:10mm;{look}">'
                     f'<span dir="ltr">{en}</span><span dir="rtl" style="text-align:right">{ar}</span></div>')
         return (f'<div class="cover">{wave}{logo}'
-                f'<div style="position:absolute;top:30%;left:6%;right:6%">{side(title_ar, title_en, 30, dark)}'
-                f'<div style="height:4mm"></div>{side(sub_ar, sub_en, 15, dark, 400)}</div>'
-                f'<div style="position:absolute;bottom:9%;left:6%;right:6%">{side(org_ar, org_en, 14, c["primary"])}'
-                f'<div style="height:3mm"></div>{side(ed_ar, ed_en, 12, c["text"], 400)}</div></div>')
+                f'<div style="position:absolute;top:30%;left:6%;right:6%">{part("title")}'
+                f'<div style="height:4mm"></div>{part("subtitle")}</div>'
+                f'<div style="position:absolute;bottom:9%;left:6%;right:6%">{part("org")}'
+                f'<div style="height:3mm"></div>{part("edition")}</div></div>')
 
     def k_chapter(self, s, depth):
         st = s.get('style') or {}
@@ -867,34 +896,81 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         return self.blocks_html(s)
 
     # ── blocks ───────────────────────────────────────────────────────
+    def run_of(self, b, current):
+        """The page direction a page break asks for: 'T' (turned from the manual), 'N' (the manual's), or the
+        current one when it asks for none."""
+        o = (b.get('style') or {}).get('orient')
+        if b['kind'] != 'pagebreak' or o not in ('portrait', 'landscape', 'section'):
+            return current
+        if o == 'section':
+            return None
+        return 'N' if o == self.lay['orientation'] else 'T'
+
     def blocks_html(self, s):
-        pieces = []                      # (html, kind of block)
+        pieces = []                      # (html, kind of block, page direction of its run)
+        run = None
         for i, b in enumerate(self.db.blocks(s['id'])):
             self._bref = f'{s["id"]}:{i}'
+            if self.mode == 'print':
+                run = self.run_of(b, run)
             h = self.block(b)
             if not h:
                 continue
             split = h.split(PIECE) if b['kind'] in ('paragraph', 'bullets', 'numbered', 'heading') else [h.replace(PIECE, '')]
+            look = self.block_look(b)
             for j, p in enumerate(split):
                 if 'data-b=' not in p[:p.find('>') + 1]:     # every piece names its block (used by the layout check)
                     p = re.sub(r'^<([a-z0-9]+)', lambda m: f'<{m.group(1)} data-b="{self._bref}"', p, count=1)
-                pieces.append((p, b['kind'] if j == 0 else 'paragraph'))
+                if look:                                     # the block's own colour and size
+                    p = re.sub(r'^<([a-z0-9]+)', lambda m: f'<{m.group(1)} style="{look}"', p, count=1) \
+                        if ' style="' not in p[:p.find('>') + 1] else p.replace(' style="', f' style="{look}', 1)
+                pieces.append((p, b['kind'] if j == 0 else 'paragraph', run))
         self._bref = None
         if self.mode != 'print':
-            return ''.join(p for p, _ in pieces)
+            return ''.join(p for p, _k, _r in pieces)
         small = ('paragraph', 'bullets', 'numbered', 'quote', 'links')
         out, i = [], 0
         while i < len(pieces):             # a sub-heading stays on the page of what follows it
-            p, k = pieces[i]
-            if k == 'heading' and i + 1 < len(pieces) and pieces[i + 1][1] in small:
-                out.append((f'<div class="keep">{p}{pieces[i + 1][0]}</div>', 'keep'))
+            p, k, r = pieces[i]
+            if k == 'heading' and i + 1 < len(pieces) and pieces[i + 1][1] in small and pieces[i + 1][2] == r:
+                out.append((f'<div class="keep">{p}{pieces[i + 1][0]}</div>', 'keep', r))
                 i += 2
                 continue
-            out.append((p, k))
+            out.append((p, k, r))
             i += 1
-        if out and out[0][1] in small + ('heading', 'keep', 'callout'):
-            return out[0][0] + GLUE + ''.join(p for p, _ in out[1:])
-        return ''.join(p for p, _ in out)
+
+        def joined(items):
+            # pages of another direction: the blocks after a page break that asks for one sit in a box of that
+            # named page, so Paged.js starts a page of that size for them
+            html, cur, buf = [], None, []
+            for p, _k, r in items:
+                if r != cur and buf:
+                    html.append(f'<div class="pgo{cur}">{"".join(buf)}</div>' if cur else ''.join(buf))
+                    buf = []
+                cur = r
+                buf.append(p)
+            if buf:
+                html.append(f'<div class="pgo{cur}">{"".join(buf)}</div>' if cur else ''.join(buf))
+            return ''.join(html)
+        if out and out[0][1] in small + ('heading', 'keep', 'callout') and not out[0][2]:
+            return out[0][0] + GLUE + joined(out[1:])
+        return joined(out)
+
+    @staticmethod
+    def block_look(b):
+        st = b.get('style') or {}
+        css = []
+        if isinstance(st.get('color'), str) and re.fullmatch(r'#[0-9a-fA-F]{6}', st['color']):
+            css.append(f'color:{st["color"]}')
+        try:
+            size = int(st.get('size') or 100)
+        except (TypeError, ValueError):
+            size = 100
+        if size != 100 and 50 <= size <= 300:
+            css.append(f'font-size:{size}%')
+        if st.get('bold'):
+            css.append('font-weight:700')
+        return ';'.join(css) + (';' if css else '')
 
     def block(self, b):
         k, d = b['kind'], b.get('data') or {}

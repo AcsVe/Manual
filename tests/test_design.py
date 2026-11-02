@@ -200,7 +200,8 @@ def test_click_on_preview_opens_the_block(tmp_path, monkeypatch, db, manual):
     w.editor.preview.picked.emit(f'b {v["id"]}:1 en')
     assert w.editor.sid == v['id']
     w.editor.preview.picked.emit('m header')
-    assert w.tabs.currentWidget() is w._areas[w.design] and w.design.tabs.currentIndex() == 2
+    insp = w.editor.preview.inspector
+    assert insp.isVisibleTo(w.editor.preview) and 'الترويسة' in insp.title.text()     # its settings open in place
     w.close()
 
 

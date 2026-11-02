@@ -328,6 +328,10 @@ class DesignTab(QWidget):
         self.preview.auto.hide()
         self.preview.refresh_btn.clicked.connect(self.refresh_preview)
         self.preview.picked.connect(self._picked)
+        self.preview.inspector.changed.connect(self._inspected)
+        self.preview.inspector.before_change = lambda: self._timer.isActive() and (self._timer.stop(), self.save(quiet=True))
+        self.preview.inspector.open_block.connect(lambda sid, i: self.ctx.window and (self.ctx.window.show_page(self.ctx.window.editor),
+                                                                              self.ctx.window.editor.goto(sid, i)))
         self.preview.lay.itemAt(0).layout().insertWidget(0, self.preview_scope)
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self.tabs)
@@ -365,12 +369,14 @@ class DesignTab(QWidget):
         self.tabs.setCurrentIndex(self.TABS.get(name, 1))
 
     def _picked(self, what):
-        kind, _, rest = what.partition(' ')
-        if kind in ('b', 's'):
-            if self.ctx.window:
-                self.ctx.window.open_in_editor(what)
-        else:
-            self.open_tab({'header': 'header', 'footer': 'header', 'cover': 'background'}.get(rest, 'page'))
+        self.preview.inspector.show_for(what)
+
+    def _inspected(self, sid):
+        if self._timer.isActive():
+            self._timer.stop()
+        self.load_manual(self.mid, keep_history=True)       # the fields here follow what the panel changed
+        self._others_stale = True
+        self.refresh_preview()
 
     def _changed(self, *_):
         if self._loading or not self.mid:
