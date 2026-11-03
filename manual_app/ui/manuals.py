@@ -155,12 +155,12 @@ FILE_FILTER = ('ملفات مدعومة / Supported files (*.docx *.pdf *.html *
                'Word (*.docx);;PDF (*.pdf);;HTML (*.html *.htm);;Text (*.txt);;Pictures (*.png *.jpg *.jpeg *.bmp *.gif *.webp)')
 
 
-def _bring_in(parent, ctx, mid, parent_sid, path, kind='text', pages=None, image_pages=()):  # noqa: PLR0913
+def _bring_in(parent, ctx, mid, parent_sid, path, kind='text', pages=None, image_pages=(), page_looks=None, drop=None):  # noqa: PLR0913
     """Reads ``path`` into manual ``mid`` (under ``parent_sid``), tidies it with the checker's safe fixes and returns
-    (section ids, the summary text, the points left) — or None after telling what went wrong."""
+    (section ids, the summary text, the points left, the sections as read) — or None after telling what went wrong."""
     QGuiApplication.setOverrideCursor(Qt.WaitCursor)
     try:
-        secs, imgs = importer.read_any(path, pages, image_pages)
+        secs, imgs = importer.read_any(path, pages, image_pages, page_looks=page_looks, drop=drop)
         if not secs:
             raise ValueError(L('لم يُعثر في الملف على نص ولا صفحات.', 'Nothing was found in the file.'))
         ids = importer.add_to_manual(ctx.db, mid, secs, imgs, parent_sid, kind)
@@ -176,16 +176,16 @@ def _bring_in(parent, ctx, mid, parent_sid, path, kind='text', pages=None, image
         error(parent, L('تعذّر فتح الملف:', 'The file cannot be opened:') + f'\n{e}')
         return None
     QGuiApplication.restoreOverrideCursor()
-    blocks = sum(len(s['blocks']) for s in secs)
+    blocks = sum(1 for s in secs for b in s['blocks'] if b.get('kind') != 'pagebreak')
     pics = sum(1 for s in secs for b in s['blocks'] if b.get('kind') == 'image' and (b.get('style') or {}).get('fullpage'))
     ctx.db.audit('import', file=os.path.basename(path), sections=len(ids), tidied=tidied)
     text = L(f'استُورد {len(ids)} قسماً و{blocks} كتلة و{len(imgs)} صورة.', f'Imported {len(ids)} sections, {blocks} blocks and {len(imgs)} images.')
     if pics:
-        text += L(f' {pics} صفحة لا نص فيها (مسح ضوئي أو رسم) أُدخلت صفحاتٍ كاملة كما هي.',
-                  f' {pics} page(s) without text (a scan or a drawing) came in as whole pages.')
+        text += L(f' {pics} صفحة أُدخلت صفحاتٍ كاملة كما هي (الغلاف، والصفحات الفاصلة، والصفحات الممسوحة ضوئياً أو التي لا يُقرأ نصها).',
+                  f' {pics} page(s) came in whole, as they are (the cover, divider pages, scanned pages or pages whose text cannot be read).')
     if tidied:
         text += L(f' ضبط المدقق {tidied} موضعاً تلقائياً.', f' The checker tidied {tidied} place(s).')
-    return ids, text, left
+    return ids, text, left, secs
 
 
 def _report(parent, ctx, text, left):
@@ -198,60 +198,145 @@ def _report(parent, ctx, text, left):
     info(parent, text + L(' راجعها في المحرر.', ' Review them in the editor.'))
 
 
+class _Stopped(Exception):
+    """Reading the file was stopped from its progress window."""
+
+
+def _read_pdf(parent, path):
+    """Opens a PDF for reading with its look: asks for its password when it has one, mends a damaged file where it
+    can, and reads the design of its pages (with a progress window). Returns (path to read, look or None, temporary
+    file or None), or None when the file is not opened (no password given, stopped, unreadable)."""
+    from PySide6.QtWidgets import QInputDialog, QLineEdit as _Edit, QProgressDialog
+    from ..core import pdf_look
+    password = None
+    for attempt in range(4):
+        try:
+            QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                use, tmp, note = pdf_look.prepare(path, password)
+            finally:
+                QGuiApplication.restoreOverrideCursor()
+            break
+        except pdf_look.PdfPasswordError:
+            if attempt == 3:
+                error(parent, L('كلمة المرور غير صحيحة، فلم يُفتح الملف.', 'The password is not correct; the file was not opened.'))
+                return None
+            msg = L('الملف محمي بكلمة مرور. اكتب كلمة المرور لفتحه:', 'The file is protected by a password. Type the password to open it:')
+            if attempt:
+                msg = L('كلمة المرور غير صحيحة. اكتبها مرة أخرى:', 'The password is not correct. Type it again:')
+            password, ok = QInputDialog.getText(parent, os.path.basename(path), msg, _Edit.Password)
+            if not ok:
+                return None
+        except ValueError as e:
+            error(parent, L('تعذّر فتح الملف:', 'The file cannot be opened:') + f'\n{e}')
+            return None
+    if note == 'pictures':                       # its text cannot be read: every page comes in as it is
+        return use, {'pictures': True, 'n': importer.pdf_page_count(use) or 0}, tmp
+    box = QProgressDialog(L('قراءة تصميم صفحات الملف…', 'Reading the design of the pages…'), L('إيقاف', 'Stop'), 0, 100, parent)
+    box.setWindowTitle(os.path.basename(path))
+    box.setWindowModality(Qt.WindowModal)
+    box.setMinimumDuration(400)
+
+    def progress(done, total):
+        box.setMaximum(max(1, total))
+        box.setValue(done)
+        QGuiApplication.processEvents()
+        if box.wasCanceled():
+            raise _Stopped()
+    try:
+        look = pdf_look.analyse(use, progress)
+    except _Stopped:
+        box.close()
+        if tmp:
+            os.remove(tmp)
+        return None
+    except Exception:  # noqa: BLE001 — the text is still read, without the look
+        look = None
+    box.close()
+    return use, look, tmp
+
+
+def _bring_in_pdf(parent, ctx, mid, parent_sid, path, mode, kind='text', pages=None, image_pages=()):  # noqa: PLR0913
+    """A PDF with its look (pdf_look): mode «manual» for a manual opened from the file, «sections» for a file
+    imported into a manual. Returns what _bring_in returns, or None."""
+    from ..core import pdf_look
+    read = _read_pdf(parent, path)
+    if not read:
+        return None
+    use, look, tmp = read
+    try:
+        if look and look.get('pictures'):
+            all_pages = set(pages or range(1, look['n'] + 1))
+            return _bring_in(parent, ctx, mid, parent_sid, use, kind, pages, all_pages)
+        keys = pdf_look.page_keys(look) if look else None
+        shown = set(image_pages or ()) | (look['image_pages'] if look else set())
+        done = _bring_in(parent, ctx, mid, parent_sid, use, kind, pages, shown, keys,
+                         pdf_look.drop_lines(look) if look else None)
+        if done and look:
+            levels = [(sid, int(sec.get('level') or 1), sec) for sid, sec in zip(done[0], done[3])]
+            try:
+                QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+                pdf_look.apply(ctx.db, mid, look, levels, mode,
+                               name=L('تصميم صفحات الملف الأصلي', 'Design of the original pages'))
+            finally:
+                QGuiApplication.restoreOverrideCursor()
+        return done
+    finally:
+        pdf_look.close(look)
+        if tmp and os.path.exists(tmp):
+            os.remove(tmp)
+
+
 def import_into(parent, ctx, mid, parent_sid):
-    """Asks for a file and imports it under ``parent_sid`` of manual ``mid``. Returns True when something was added."""
+    """Asks for a file and imports it under ``parent_sid`` of manual ``mid``. Returns True when something was added.
+    A PDF keeps the design of its pages on the sections it brings in."""
     path, _ = QFileDialog.getOpenFileName(parent, L('استيراد ملف', 'Import a file'), '', FILE_FILTER)
     if not path:
         return False
     d = ImportDialog(parent, path)
     if not d.exec():
         return False
-    pages = image_pages = None
     if os.path.splitext(path)[1].lower() == '.pdf':
         pages = d.parse_pages(d.pages.text()) or None
         image_pages = set(d.parse_pages(d.image_pages.text()))
-    done = _bring_in(parent, ctx, mid, parent_sid, path, d.kind.currentData(), pages, image_pages or ())
+        done = _bring_in_pdf(parent, ctx, mid, parent_sid, path, 'sections', d.kind.currentData(), pages, image_pages)
+    else:
+        done = _bring_in(parent, ctx, mid, parent_sid, path, d.kind.currentData())
     if not done:
         return False
     _report(parent, ctx, done[1], done[2])
     return True
 
 
-def keep_pdf_look(db, mid, path):
-    """A PDF keeps its look: its first page comes in as the cover (a whole page, as it is), and the design of its
-    pages (frames, coloured bands, logos), without their text, becomes the background of every page; the program's
-    own header shape and footer line are then left out, so the two do not overlap. Returns the pages to bring in as
-    pictures."""
-    n = importer.pdf_page_count(path)
-    if n < 2:
-        return ()
-    QGuiApplication.setOverrideCursor(Qt.WaitCursor)
-    try:
-        # the first page after the cover that has a design (a plain page between them does not hide it)
-        design = None
-        for page in range(2, min(n, 6) + 1):
-            design = importer.pdf_page_design(path, page)
-            if design:
-                break
-    finally:
-        QGuiApplication.restoreOverrideCursor()
-    if design:
-        data, w, h = design
-        aid = db.add_asset(L('تصميم صفحات الملف الأصلي', 'Design of the original pages') + '.png', data, 'image/png',
-                           'background', w, h)
-        from ..core.templates import layout_with_defaults
-        lay = layout_with_defaults(db.manual(mid)['layout'])
-        lay['page_bg'] = {'asset_id': aid, 'fit': 'stretch', 'layer': 'behind', 'opacity': 1.0}
-        lay['header'] = dict(lay['header'], style='none', logo=False)
-        lay['footer'] = dict(lay['footer'], style='none')
-        lay['boxes'] = False             # the original pages have their own frames
+def _fit_languages(db, mid, ids):
+    """The language display of a manual opened from a file follows its content: Arabic only, English only, the two
+    side by side when the file pairs them, otherwise each paragraph in its own language at full width."""
+    import re
+    ar = en = pairs = total = 0
+    for sid in ids:
+        for b in db.blocks(sid):
+            a = re.sub(r'<[^>]+>|\s', '', b.get('ar') or '')
+            e = re.sub(r'<[^>]+>|\s', '', b.get('en') or '')
+            if not (a or e):
+                continue
+            total += 1
+            ar += len(a)
+            en += len(e)
+            pairs += bool(a and e)
+    if not total:
+        return
+    mode = 'ar' if not en else 'en' if not ar else 'bi_side' if pairs >= total * 0.3 else 'bi_stack'
+    from ..core.templates import layout_with_defaults
+    lay = layout_with_defaults(db.manual(mid)['layout'])
+    if lay.get('lang_mode') != mode:
+        lay['lang_mode'] = mode
         db.save_manual({'layout': lay}, mid)
-    return {1}
 
 
 def open_file(parent, ctx, path=None):
     """Opens any supported file as a new manual at once, with no questions: the title is the file name, the page
-    direction follows the file, the rest takes the usual settings (all changeable later). Returns the new manual."""
+    direction follows the file, the rest takes the usual settings (all changeable later). A PDF keeps its look: its
+    cover, the design of its pages, its margins, page size and page numbers. Returns the new manual."""
     if not path:
         path, _ = QFileDialog.getOpenFileName(parent, L('فتح ملف', 'Open a file'), ctx.db.get('last_dir') or '', FILE_FILTER)
         if not path:
@@ -265,14 +350,13 @@ def open_file(parent, ctx, path=None):
               'org_ar': ctx.db.get('org_ar') or '', 'org_en': ctx.db.get('org_en') or '',
               'issue_date': __import__('datetime').date.today().isoformat()}
     mid = create_from_starter(ctx.db, 'blank', fields)
-    image_pages = ()
-    if os.path.splitext(path)[1].lower() == '.pdf':
-        image_pages = keep_pdf_look(ctx.db, mid, path)
-    done = _bring_in(parent, ctx, mid, None, path, image_pages=image_pages)
+    is_pdf = os.path.splitext(path)[1].lower() == '.pdf'
+    done = _bring_in_pdf(parent, ctx, mid, None, path, 'manual') if is_pdf else _bring_in(parent, ctx, mid, None, path)
     if not done:
         ctx.db.delete_manual(mid)
         return None
-    if image_pages:                     # the file's own first page is the cover: the ready-made one goes
+    _fit_languages(ctx.db, mid, done[0])
+    if is_pdf:                          # the file's own first page (its cover, or its first page of text) opens it
         ctx.db.delete_sections([s['id'] for s in ctx.db.sections(mid) if s['kind'] == 'cover'])
     ctx.manual_id = mid
     if ctx.window:

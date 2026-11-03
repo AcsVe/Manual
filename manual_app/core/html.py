@@ -489,6 +489,18 @@ class Renderer:
                       '.pgoT{page:oriT} .pgoN{page:oriN} .pgoTp{page:oriTp} .pgoNp{page:oriNp}')
         AL = {'justify': ('justify', 'justify'), 'start': ('right', 'left'), 'center': ('center', 'center')}.get(
             lay.get('align', 'justify'), ('justify', 'justify'))
+        top_none = '@top-left{content:none}@top-center{content:none}@top-right{content:none}'
+        for run in sorted(r for r in getattr(self, 'used_runs', ()) if r and 'g' in r):
+            m = re.fullmatch(r'([TN])(p?)(b?)g(\d+)', run)
+            if not m:
+                continue
+            w_, h_ = (ph, pw) if m.group(1) == 'T' else (pw, ph)
+            aid = int(m.group(4))
+            look = 'background:#ffffff;' if not aid else \
+                'background:' + self.bg_css(BG.normalize({'asset_id': aid, 'fit': 'stretch'})) + ';'
+            named_runs += f' @page ori{run}{{size:{w_}mm {h_}mm;{look}{top_none if m.group(3) else ""}}} .pgo{run}{{page:ori{run}}}'
+            if m.group(1) == 'T':
+                front_css.append(turned(f'ori{run}'))
         named = []
         for s, _ in self.db.flat(self.m['id']):
             sid = s['id']
@@ -502,7 +514,10 @@ class Renderer:
                 rules.append(f'size:{ph}mm {pw}mm;')
                 front_css.append(turned(f'sp{sid}'))
             if BG.active(sbg) and sbg['area'] == 'page' and sbg['layer'] == 'behind':
-                rules.append('background:' + ', '.join(head_layers + [self.bg_css(sbg)]) + ';')
+                # a section brought in with the look of its file: its own design only, without the manual's header
+                rules.append('background:' + ', '.join(([] if st.get('pdf_look') else head_layers) + [self.bg_css(sbg)]) + ';')
+                if st.get('pdf_look'):
+                    rules.append(top_none)
             elif BG.active(sbg) and sbg['area'] == 'page':
                 front_css.append(f'.pagedjs_sp{sid}_page .pagedjs_pagebox::after{{background:{self.bg_css(sbg)}}}')
             named.append(f'@page sp{sid}{{{"".join(rules)}}}.pg{sid}{{page:sp{sid}}}')
@@ -644,6 +659,7 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         if self.mode == 'print':
             self.plan_numbering(flat)
         self.needs_symbols = False
+        self.used_runs = set()
         parts = []
         self._pending = ''
         shown = [(s, d) for s, d in flat if self.only is None or s['id'] in self.only]
@@ -733,6 +749,8 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
             status = f'<span class="status">{escape(STATUSES.get(s["status"], ("", ""))[0 if self.lm != "en" else 1])}</span>'
         ar, en = escape(s.get('title_ar') or ''), escape(s.get('title_en') or '')
         tbar = '<div class="tbar stitle">' + self.pair(numh + ar + status, numh + en, raw=True) + '</div>'
+        if st.get('no_title') and self.mode == 'print':
+            tbar = ''                        # imported pages that had no heading of their own: the title is for the contents only
         if self.mode == 'print' and kind in ('text', 'policy') and not re.sub(r'<[^>]+>|\s', '', inner) \
                 and getattr(self, '_next_child', False) and not BG.active(BG.of_section(st)) and s['id'] not in self.own_page:
             # a title whose content is its sub-sections goes on the page of the first of them
@@ -949,24 +967,32 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
 
     # ── blocks ───────────────────────────────────────────────────────
     def run_of(self, b, current, base='N'):
-        """What a page break asks of the pages after it: their direction and whether the header keeps its coloured
-        shape. The answer names the page they go on: 'T'/'N' (turned from the manual / the manual's direction) and
-        'p' for pages without the shape; None for the section's own pages. ``base``: the section's direction."""
+        """What a page break asks of the pages after it: their direction, whether the header keeps its coloured
+        shape, and a page design of their own. The answer names the page they go on: 'T'/'N' (turned from the
+        manual / the manual's direction), 'p' for pages without the shape, 'b' for pages without the header text,
+        'g<id>' for a design picture of their own ('g0' a plain white page); None for the section's own pages.
+        ``base``: the section's direction."""
         st = b.get('style') or {}
         o, head = st.get('orient'), st.get('head')
-        if b['kind'] != 'pagebreak' or (o not in ('portrait', 'landscape', 'section') and head not in ('plain', 'shape')):
+        if b['kind'] != 'pagebreak' or (o not in ('portrait', 'landscape', 'section') and head not in ('plain', 'shape')
+                                         and 'page_bg' not in st):
             return current
-        cur_o = (current or '').rstrip('p')
-        plain = bool(current and current.endswith('p'))
+        m = re.fullmatch(r'([TN]?)(p?)(b?)(?:g(\d+))?', current or '') or re.fullmatch('', '')
+        cur_o, plain = (m.group(1) or '', bool(m.group(2))) if current else ('', False)
+        bare, g = (bool(m.group(3)), m.group(4)) if current else (False, None)
         if o == 'section':
             cur_o = ''
         elif o in ('portrait', 'landscape'):
             cur_o = 'N' if o == self.lay['orientation'] else 'T'
         if head in ('plain', 'shape'):
             plain = head == 'plain'
-        if plain:
-            return (cur_o or base) + 'p'
-        return cur_o or None
+        if 'page_bg' in st:
+            v = st.get('page_bg')
+            g = '0' if v == 'white' else (str(int(v)) if v else None)
+            bare = bool(st.get('bare')) and g is not None
+        if not (plain or g):
+            return cur_o or None
+        return (cur_o or base) + ('p' if plain else '') + ('b' if bare else '') + (f'g{g}' if g else '')
 
     def blocks_html(self, s):
         pieces = []                      # (html, kind of block, the named page of its run)
@@ -1009,11 +1035,13 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
             html, cur, buf = [], None, []
             for p, _k, r in items:
                 if r != cur and buf:
+                    self.used_runs.add(cur)
                     html.append(f'<div class="pgo{cur}">{"".join(buf)}</div>' if cur else ''.join(buf))
                     buf = []
                 cur = r
                 buf.append(p)
             if buf:
+                self.used_runs.add(cur)
                 html.append(f'<div class="pgo{cur}">{"".join(buf)}</div>' if cur else ''.join(buf))
             return ''.join(html)
         if out and out[0][1] in small + ('heading', 'keep', 'callout') and not out[0][2]:

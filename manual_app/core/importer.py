@@ -561,6 +561,16 @@ def fix_arabic(text):
     return re.sub(r'\s+', ' ', t).strip()
 
 
+def slanted(chars):
+    """Most letters of a line turned (a diagonal watermark): pdfminer's «upright» is false only past 90°."""
+    def turned(c):
+        a, b, cc, d = c.matrix[:4]
+        return not c.upright or abs(b) > 0.08 * max(abs(a), 1e-6) or abs(cc) > 0.08 * max(abs(d), 1e-6)
+    return bool(chars) and sum(1 for c in chars if turned(c)) > len(chars) / 2
+
+
+PAGE_NO_RE = re.compile(r'(Page|P a g e|صفحة|الصفحة)?\s*[-–]?\s*\d+\s*[-–]?\s*((\||/|من|of)\s*\d+)?', re.I)
+
 _LTR = re.compile(r'[A-Za-z0-9٠-٩۰-۹@#%&_+=]')
 _MIRROR = str.maketrans('()[]{}<>«»', ')(][}{><»«')
 
@@ -646,8 +656,10 @@ def _looks_reversed(t):
     return rev > fwd
 
 
-def import_pdf(path, pages=None, image_pages=(), auto_images=True):
+def import_pdf(path, pages=None, image_pages=(), auto_images=True, page_looks=None, drop=None):
     """pages: page numbers (1-based) to read (None = all); image_pages: pages brought in as pictures.
+    ``page_looks``: {page: design key} (pdf_look): where the design changes inside a section, a page break that
+    carries the new design is put in, and every section notes the design of its first page («_look»).
     ``auto_images``: a page with almost no text (a scan, a drawing, a chart) comes in as a whole-page picture, so
     nothing on it is lost and a scanned file opens as it is."""
     image_pages = set(image_pages or ())
@@ -666,6 +678,8 @@ def import_pdf(path, pages=None, image_pages=(), auto_images=True):
                 if not isinstance(ln, LTTextLine):
                     continue
                 chars = [c for c in ln if isinstance(c, LTChar)]
+                if slanted(chars):
+                    continue                    # علامة مائية مائلة: تبقى في تصميم الصفحة لا في النص
                 if chars and ln.get_text().strip():
                     frags.append({'x0': ln.x0, 'x1': ln.x1, 'y0': ln.y0, 'y1': ln.y1, 'chars': chars, 'raw': ln.get_text()})
         out = []
@@ -679,7 +693,8 @@ def import_pdf(path, pages=None, image_pages=(), auto_images=True):
                 text = line_from_chars([(c.x0, c.x1, c.size, c.get_text()) for c in chars]) or fix_arabic(raw)
             else:
                 text = re.sub(r'\s+', ' ', raw)
-            out.append({'x0': f['x0'] / W, 'x1': f['x1'] / W, 'y': 1 - f['y1'] / H, 'size': size, 'bold': bold, 'text': text})
+            out.append({'x0': f['x0'] / W, 'x1': f['x1'] / W, 'y': 1 - f['y1'] / H, 'size': size, 'bold': bold, 'text': text,
+                        'lh': size / H})
             sizes.append(size)
         out.sort(key=lambda r: (round(r['y'], 3), -r['x1'] if is_arabic(r['text']) else r['x0']))
         real = pages[pno - 1] if pages else pno
@@ -698,18 +713,73 @@ def import_pdf(path, pages=None, image_pages=(), auto_images=True):
             if r['y'] < 0.12 or r['y'] > 0.9:
                 rep[re.sub(r'\d+', '#', r['text'])] += 1
     many = max(2, len(lines_by_page) // 3)
-    sections = [_new(1, *_title_split(os.path.splitext(os.path.basename(path))[0]))]
+    fname = _title_split(os.path.splitext(os.path.basename(path))[0])
+    first_sec = _new(1, '', '')
+    first_sec['_untitled'] = fname
+    sections = [first_sec]
     images = []
+
+    def weight(sec):
+        return len(sec['blocks']) + len(sec.get('title_ar') or '') + len(sec.get('title_en') or '') + \
+            sum(len(b.get('ar') or '') + len(b.get('en') or '') for b in sec['blocks'])
+
+    # a page whose text ends well above where the pages' text usually ends was broken there on purpose: the page
+    # after it starts a new page here too
+    ends = {}
     for pno, ls in lines_by_page:
+        body_ls = [r for r in ls if 0.12 <= r['y'] <= 0.9]
+        if body_ls and pno not in image_pages:
+            ends[pno] = max(r['y'] for r in body_ls)
+    usual = sorted(ends.values())[int(len(ends) * 0.9)] if len(ends) >= 3 else None
+    limit = max(0.73, (usual or 0) - 0.15)
+    early = {pno for pno, y in ends.items() if y < limit}
+    state = {'look': None, 'break': False}
+
+    def add_block(blk):
+        """Adds a block to the current section; the first block of a page whose design differs from the page
+        before it comes after a page break that carries the design (or starts the section with it)."""
+        sec = sections[-1]
+        key = state.get('want')
+        if state['break']:
+            state['break'] = False
+            if sec['blocks'] and sec['blocks'][-1]['kind'] != 'pagebreak' and (key is None or key == state['look']):
+                sec['blocks'].append({'kind': 'pagebreak', 'ar': '', 'en': ''})
+            elif not sec['blocks']:
+                sec['_new_page'] = True
+        if key is not None:
+            if not sec['blocks']:
+                sec.setdefault('_look', key)
+            elif key != state['look']:
+                sec['blocks'].append({'kind': 'pagebreak', 'ar': '', 'en': '', 'style': {'page_look': key}})
+            state['look'] = key
+            state['want'] = None
+        sec['blocks'].append(blk)
+
+    def one_page(pno, ls):
+        state['want'] = (page_looks or {}).get(pno)
         if pno in image_pages:
             png = render_pdf_page(path, pno)
             if png:
                 images.append((png, 'image/png'))
-                sections[-1]['blocks'].append({'kind': 'image', 'ar': '', 'en': '', 'data': {'asset': len(images) - 1, 'width': 100},
+                state['want'] = None             # a whole page as it is: no design of the pages around it
+                first = len(sections) == 1 and not sections[0]['blocks']
+                into = sections[-1]
+                if not into['blocks'] and into.get('_untitled') and len(sections) > 1:
+                    into = sections[-2]              # more whole pages straight after the cover stay with it
+                into['blocks'].append({'kind': 'image', 'ar': '', 'en': '', 'data': {'asset': len(images) - 1, 'width': 100},
                                                'style': {'fullpage': True}})
-            continue
+                if first and pno != lines_by_page[-1][0]:
+                    # the file opens with this page (its cover): what follows has its own section, with no printed
+                    # heading unless the page has one
+                    nxt = _new(1, '', '')
+                    nxt['_untitled'] = fname
+                    sections.append(nxt)
+            return
         ls = [r for r in ls if not ((r['y'] < 0.12 or r['y'] > 0.9) and rep[re.sub(r'\d+', '#', r['text'])] >= many)]
-        ls = [r for r in ls if not re.fullmatch(r'(Page|P a g e|صفحة)?\s*\d+\s*(\|\s*\d+)?', r['text'])]
+        ls = [r for r in ls if not PAGE_NO_RE.fullmatch(r['text'])]
+        gone = (drop or {}).get(pno)
+        if gone:                                 # part of the page design (pdf_look): stays in the picture
+            ls = [r for r in ls if not any(re.sub(r'\s+', '', r['text']) == t and abs(r['y'] - y) < 0.012 for t, y in gone)]
         # paragraphs: consecutive lines of the same language, size and column
         para = None
         for r in ls:
@@ -719,11 +789,19 @@ def import_pdf(path, pages=None, image_pages=(), auto_images=True):
             if big:
                 ar_t, en_t = (r['text'], '') if ar else ('', r['text'])
                 cur = sections[-1]
-                if not cur['blocks'] and ((ar_t and not cur['title_ar']) or (en_t and not cur['title_en'])) and len(sections) > 1:
+                if not cur['blocks'] and ((ar_t and not cur['title_ar']) or (en_t and not cur['title_en'])) and \
+                        (len(sections) > 1 or cur.get('_untitled')):
                     cur['title_ar'] = cur['title_ar'] or ar_t
                     cur['title_en'] = cur['title_en'] or en_t
                 else:
                     sections.append(_new(1 if r['size'] >= body * 1.7 else 2, ar_t, en_t))
+                    if state['break']:
+                        sections[-1]['_new_page'] = True
+                        state['break'] = False
+                    if state.get('want') is not None or state['look'] is not None:
+                        sections[-1]['_look'] = state['want'] if state.get('want') is not None else state['look']
+                        state['look'] = sections[-1]['_look']
+                        state['want'] = None
                 para = None
                 continue
             kind = 'heading' if heading else 'paragraph'
@@ -732,9 +810,13 @@ def import_pdf(path, pages=None, image_pages=(), auto_images=True):
             if bullet:
                 kind = 'bullets'
             side = 'ar' if ar else 'en'
+            # the next line of the same paragraph: no wider gap than its lines so far (a paragraph break leaves more)
+            dy = r['y'] - para['y'] if para else 0
+            pitch = para.get('pitch') if para else None
             if para and para['kind'] == kind == 'paragraph' and para['side'] == side and para['size'] == r['size'] \
-                    and r['y'] - para['y'] < 0.05:
+                    and 0 < dy and (dy <= pitch * 1.3 if pitch else dy <= r['lh'] * 2.0):
                 para['block'][side] += ' ' + text
+                para['pitch'] = pitch or dy
                 para['y'] = r['y']
                 continue
             if para and kind == 'bullets' and para['kind'] == 'bullets' and para['side'] == side:
@@ -750,12 +832,24 @@ def import_pdf(path, pages=None, image_pages=(), auto_images=True):
                     break
             if blk is None:
                 blk = {'kind': kind, 'ar': '', 'en': '', '_y': r['y']}
-                sections[-1]['blocks'].append(blk)
+                add_block(blk)
             blk[side] = escape(text)
             para = {'kind': kind, 'side': side, 'size': r['size'], 'y': r['y'], 'block': blk}
+
+    prev = None
+    for pno, ls in lines_by_page:
+        before = {id(x): weight(x) for x in sections}
+        state['break'] = prev in early
+        one_page(pno, ls)
+        prev = pno
+        for x in sections:                       # من أي صفحات جاء كل قسم (لتصميم صفحاته واتجاهها)
+            d = weight(x) - before.get(id(x), 0)
+            if d > 0:
+                x.setdefault('_pages', Counter())[pno] += d
     for s in sections:
         for b in s['blocks']:
             b.pop('_y', None)
+    sections = [s for s in sections if s['blocks'] or s.get('title_ar') or s.get('title_en') or s is sections[0]]
     if len(sections) > 1 and not sections[0]['blocks']:
         sections.pop(0)
     return sections, images
@@ -791,64 +885,6 @@ def _on_white(img):
     p.drawImage(0, 0, img)
     p.end()
     return out
-
-
-def is_plain_page(img):
-    """A page with no design: nearly every point pure white. A pale background (cream, light grey, a faint
-    watermark) is a design and is kept, so the test is against pure white, not against "light"."""
-    small = img.scaled(120, 160)
-    total = small.width() * small.height()
-    white = 0
-    for x in range(small.width()):
-        for y in range(small.height()):
-            c = small.pixelColor(x, y)
-            if c.red() >= 253 and c.green() >= 253 and c.blue() >= 253:
-                white += 1
-    return white > total * 0.995
-
-
-def pdf_page_design(path, page_no, dpi=110):
-    """The design of a PDF page (frames, coloured bands, logos, pictures) without its text: the page is drawn, and
-    every line of text is painted over with the colour around it. Returns (PNG bytes, width, height), or None when the
-    page is plain (almost all white, nothing worth keeping)."""
-    try:
-        from PySide6.QtCore import QBuffer, QIODevice, QRectF, QSize
-        from PySide6.QtGui import QColor, QPainter
-        from PySide6.QtPdf import QPdfDocument
-        from pdfminer.high_level import extract_pages
-        from pdfminer.layout import LAParams, LTTextContainer, LTTextLine
-    except ImportError:
-        return None
-    doc = QPdfDocument()
-    if doc.load(path) != QPdfDocument.Error.None_ or not 1 <= page_no <= doc.pageCount():
-        return None
-    pt = doc.pagePointSize(page_no - 1)
-    k = dpi / 72
-    img = _on_white(doc.render(page_no - 1, QSize(int(pt.width() * k), int(pt.height() * k))))
-    boxes = []
-    for pg in extract_pages(path, page_numbers=[page_no - 1], laparams=LAParams(line_margin=0.4)):
-        sx, sy = img.width() / pg.width, img.height() / pg.height
-        for el in pg:
-            if isinstance(el, LTTextContainer):
-                for ln in el:
-                    if isinstance(ln, LTTextLine) and ln.get_text().strip():
-                        boxes.append(QRectF(ln.x0 * sx - 2, (pg.height - ln.y1) * sy - 2,
-                                            (ln.x1 - ln.x0) * sx + 4, (ln.y1 - ln.y0) * sy + 4))
-    p = QPainter(img)
-    for r in boxes:                              # the colour just outside the line (white, or a coloured band)
-        xs = [int(r.left()) - 2, int(r.right()) + 2]
-        ys = [int(r.top()) - 2, int(r.bottom()) + 2]
-        samples = [img.pixelColor(min(max(x, 0), img.width() - 1), min(max(y, 0), img.height() - 1))
-                   for x in xs for y in ys]
-        samples.sort(key=lambda c: c.lightness())
-        p.fillRect(r, samples[len(samples) // 2])
-    p.end()
-    if is_plain_page(img):
-        return None                                  # a plain white page: no design to keep
-    buf = QBuffer()
-    buf.open(QIODevice.WriteOnly)
-    img.save(buf, 'PNG')
-    return bytes(buf.data()), img.width(), img.height()
 
 
 def import_images(paths):
@@ -887,7 +923,7 @@ OPENABLE = {'.docx': 'Word', '.pdf': 'PDF', '.html': 'HTML', '.htm': 'HTML', '.t
             '.jpg': 'JPG', '.jpeg': 'JPG', '.bmp': 'BMP', '.gif': 'GIF', '.webp': 'WEBP'}
 
 
-def read_any(path, pdf_pages=None, image_pages=()):
+def read_any(path, pdf_pages=None, image_pages=(), page_looks=None, drop=None):
     """Any supported file: (sections, images). Raises ValueError with a readable reason."""
     ext = os.path.splitext(path)[1].lower()
     if ext == '.doc':
@@ -901,7 +937,7 @@ def read_any(path, pdf_pages=None, image_pages=()):
     if ext in ('.html', '.htm'):
         return import_html(path)
     if ext == '.pdf':
-        return import_pdf(path, pdf_pages, image_pages)
+        return import_pdf(path, pdf_pages, image_pages, page_looks=page_looks, drop=drop)
     if ext == '.txt':
         return import_text(path)
     return import_images([path])
@@ -970,9 +1006,15 @@ def add_to_manual(db, manual_id, sections, images, parent_id=None, kind='text'):
         while stack and stack[-1][0] >= lvl:
             stack.pop()
         parent = stack[-1][1] if stack else parent_id
-        sid = db.save_section({'manual_id': manual_id, 'parent_id': parent, 'kind': kind,
-                               'title_ar': s.get('title_ar') or '', 'title_en': s.get('title_en') or '',
-                               'title_placeholder': None})
+        row = {'manual_id': manual_id, 'parent_id': parent, 'kind': kind,
+               'title_ar': s.get('title_ar') or '', 'title_en': s.get('title_en') or '', 'title_placeholder': None}
+        if s.get('_new_page'):
+            row['new_page'] = 1
+        if s.get('_untitled') and not (row['title_ar'] or row['title_en']):
+            # pages without a heading: the file name names them in the contents, and nothing is printed above them
+            row['title_ar'], row['title_en'] = s['_untitled']
+            row['style'] = {'no_title': True}
+        sid = db.save_section(row)
         blocks = []
         for b in s['blocks']:
             b = dict(b)
