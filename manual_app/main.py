@@ -145,8 +145,9 @@ def selftest(out):
             gid = next(iter(look['groups']))
             design = pdf_look.group_design(look, gid)
             pdf_look.close(look)
-            look_ok = look['n'] == pages and bool(look['groups'])
-            look_note = f'look={"ok" if look_ok else "FAILED"} groups={len(look["groups"])} design={bool(design)}'
+            look_ok = look['n'] == pages and len(look['groups']) > 1 and bool(design) and not look['errors']
+            look_note = (f'look={"ok" if look_ok else "FAILED"} groups={len(look["groups"])} design={bool(design)} '
+                         + ' | '.join(e.replace('\n', ' / ') for e in look['errors']))
             ok = ok and look_ok
         except Exception:  # noqa: BLE001 — the build fails and shows why
             import traceback

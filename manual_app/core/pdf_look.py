@@ -381,6 +381,7 @@ def analyse(path, progress=None):
         step = (n - head) / (MAX_SCAN - head)
         scan = sorted(set(list(range(head)) + [head + int(i * step) for i in range(MAX_SCAN - head)]))
     sigs = {}
+    errors = look['errors'] = []                 # why a page could not be drawn (kept for the log)
     for i, idx in enumerate(scan):
         rec = pages[idx]
         try:
@@ -393,6 +394,9 @@ def analyse(path, progress=None):
         except Exception:  # noqa: BLE001 — no picture of this page (or no Qt reader): it counts as a plain page
             rec['plain'] = True
             sigs[idx] = None
+            if len(errors) < 3:
+                import traceback
+                errors.append(traceback.format_exc()[-700:])
         tick()
     # المجموعات: صفحات بالاتجاه نفسه وتصميم متقارب
     groups = []
