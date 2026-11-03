@@ -16,7 +16,7 @@ _tr = _os.path.join(_os.path.dirname(_ps.__file__), 'Qt', 'translations')
 datas = [('assets', 'assets')] + [(_os.path.join(_tr, f), 'PySide6/Qt/translations') for f in ('qtbase_ar.qm', 'qt_ar.qm')
                                   if _os.path.isfile(_os.path.join(_tr, f))] + collect_data_files('docx') + collect_data_files('pdfminer')
 a = Analysis(['run.py'], pathex=[], binaries=[], datas=datas,
-             hiddenimports=['pypdf', 'numpy', 'cryptography', 'PySide6.QtNetwork', 'PySide6.QtSvg', 'PySide6.QtSvgWidgets', 'PySide6.QtPdf', 'PySide6.QtWebEngineCore',
+             hiddenimports=['pypdf', 'cryptography', 'PySide6.QtNetwork', 'PySide6.QtSvg', 'PySide6.QtSvgWidgets', 'PySide6.QtPdf', 'PySide6.QtWebEngineCore',
                             'PySide6.QtWebEngineWidgets', 'PySide6.QtPrintSupport', 'pdfminer', 'docx', 'lxml.html'],
              hookspath=[], runtime_hooks=[], excludes=EXCLUDE, cipher=block_cipher, noarchive=False)
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)

@@ -242,32 +242,68 @@ def _render(doc, rec, size):
     return _on_white(doc.render(rec['no'] - 1, QSize(*size)))
 
 
-def _to_array(img):
-    import numpy as np
-    from PySide6.QtGui import QImage
-    img = img.convertToFormat(QImage.Format_RGB32)
-    w, h = img.width(), img.height()
-    a = np.frombuffer(img.constBits(), np.uint8, img.bytesPerLine() * h).reshape(h, img.bytesPerLine() // 4, 4)
-    return a[:, :w, :3].astype(np.float32).copy()
+class Pix:
+    """صورة صفحة بنقاطها في ذاكرة قابلة للتعديل (Qt وحده، دون مكتبات حساب خارجية: البرنامج المبني لا يحملها)."""
+
+    def __init__(self, img):
+        from PySide6.QtGui import QImage
+        img = img.convertToFormat(QImage.Format_RGB32)
+        self.w, self.h, self.stride = img.width(), img.height(), img.bytesPerLine()
+        self.buf = bytearray(bytes(img.constBits())[:self.stride * self.h])
+
+    def get(self, x, y):
+        o = y * self.stride + x * 4                  # الترتيب في الذاكرة: أزرق، أخضر، أحمر، ثم الشفافية
+        b = self.buf
+        return b[o + 2], b[o + 1], b[o]
+
+    def put(self, x, y, c):
+        o = y * self.stride + x * 4
+        self.buf[o + 2], self.buf[o + 1], self.buf[o] = c
+
+    def image(self):
+        from PySide6.QtGui import QImage
+        return QImage(bytes(self.buf), self.w, self.h, self.stride, QImage.Format_RGB32).copy()
+
+    def small(self, step=4):
+        """متوسط كل مربع step×step: صورة صغيرة للمقارنة."""
+        out = []
+        for gy in range(self.h // step):
+            row = []
+            for gx in range(self.w // step):
+                r = g = bl = 0
+                for y in range(gy * step, gy * step + step):
+                    for x in range(gx * step, gx * step + step):
+                        c = self.get(x, y)
+                        r, g, bl = r + c[0], g + c[1], bl + c[2]
+                n = step * step
+                row.append((r / n, g / n, bl / n))
+            out.append(row)
+        return out
 
 
-def _to_image(a):
-    import numpy as np
-    from PySide6.QtGui import QImage
-    h, w = a.shape[:2]
-    rgba = np.empty((h, w, 4), np.uint8)
-    rgba[:, :, :3] = np.clip(a, 0, 255).astype(np.uint8)
-    rgba[:, :, 3] = 255
-    return QImage(rgba.tobytes(), w, h, w * 4, QImage.Format_RGB32).copy()
+def _median(colors):
+    if not colors:
+        return None
+    k = len(colors) // 2
+    return tuple(sorted(c[i] for c in colors)[k] for i in range(3))
 
 
-def _erase(a, rec):
+def _gap(c1, c2):
+    return (abs(c1[0] - c2[0]) + abs(c1[1] - c2[1]) + abs(c1[2] - c2[2])) / 3
+
+
+def _mix(c1, c2, t):
+    return (int(c1[0] + (c2[0] - c1[0]) * t + 0.5), int(c1[1] + (c2[1] - c1[1]) * t + 0.5),
+            int(c1[2] + (c2[2] - c1[2]) * t + 0.5))
+
+
+def _erase(px, rec):
     """يمحو أسطر النص وأرقام الصفحات من صورة الصفحة. يُملأ موضع كل سطر بتدرّج بين لوني جانبيه (يمينه ويساره، أو
     أعلاه وأسفله، أيهما أكثر اتساقاً)، فيبقى الشريط الملوّن والشريط الجانبي والتدرّج كما هي ولا تظهر رقعة."""
-    import numpy as np
-    h, w = a.shape[:2]
+    w, h = px.w, px.h
     mm = w / max(1.0, rec['w_mm'])                    # نقاط في المليمتر في هذه الصورة
     pad = max(1, int(round(0.6 * mm)))
+    band = max(2, pad)
     for ln in rec['lines']:
         if ln.get('kind') == 'keep':
             continue
@@ -278,59 +314,69 @@ def _erase(a, rec):
         y1 = int(min(h, ln['y1'] * h + pad + lh * 0.2))
         if x1 <= x0 or y1 <= y0:
             continue
-        band = max(2, pad)
-
-        def side(block, axis):
-            return np.median(block, axis=axis) if block.size else None
-        L = side(a[y0:y1, max(0, x0 - band):x0], 1)
-        R = side(a[y0:y1, x1:min(w, x1 + band)], 1)
-        T = side(a[max(0, y0 - band):y0, x0:x1], 0)
-        B = side(a[y1:min(h, y1 + band), x0:x1], 0)
+        rows = range(y0, y1)
+        cols = range(x0, x1)
+        L = [_median([px.get(x, y) for x in range(max(0, x0 - band), x0)]) for y in rows] if x0 > 0 else None
+        R = [_median([px.get(x, y) for x in range(x1, min(w, x1 + band))]) for y in rows] if x1 < w else None
+        T = [_median([px.get(x, y) for y in range(max(0, y0 - band), y0)]) for x in cols] if y0 > 0 else None
+        B = [_median([px.get(x, y) for y in range(y1, min(h, y1 + band))]) for x in cols] if y1 < h else None
         L, R = (R if L is None else L), (L if R is None else R)
         T, B = (B if T is None else T), (T if B is None else B)
-        cost_h = float(np.abs(L - R).mean()) if L is not None else 1e9
-        cost_v = float(np.abs(T - B).mean()) if T is not None else 1e9
+        cost_h = sum(_gap(a_, b_) for a_, b_ in zip(L, R)) / len(L) if L else 1e9
+        cost_v = sum(_gap(a_, b_) for a_, b_ in zip(T, B)) / len(T) if T else 1e9
         if cost_h == cost_v == 1e9:
             continue
         if cost_h <= cost_v:
-            t = np.linspace(0.0, 1.0, x1 - x0, dtype=np.float32)[None, :, None]
-            a[y0:y1, x0:x1] = L[:, None, :] * (1 - t) + R[:, None, :] * t
+            span = max(1, x1 - x0 - 1)
+            for i, y in enumerate(rows):
+                for x in cols:
+                    px.put(x, y, _mix(L[i], R[i], (x - x0) / span))
         else:
-            t = np.linspace(0.0, 1.0, y1 - y0, dtype=np.float32)[:, None, None]
-            a[y0:y1, x0:x1] = T[None, :, :] * (1 - t) + B[None, :, :] * t
-    return a
+            span = max(1, y1 - y0 - 1)
+            for j, x in enumerate(cols):
+                for y in rows:
+                    px.put(x, y, _mix(T[j], B[j], (y - y0) / span))
+    return px
 
 
-def _band_text(a, rec):
+def _band_text(px, rec):
     """نص في أعلى الصفحة أو أسفلها فوق شريط ملوّن (اسم المؤسسة على شريط الترويسة) جزء من التصميم، ولو لم يتكرر
     (ملف بصفحة واحدة)."""
-    import numpy as np
-    h, w = a.shape[:2]
+    w, h = px.w, px.h
     for ln in rec['lines']:
         if ln.get('kind') != 'text' or not (ln['y0'] < 0.12 or ln['y1'] > 0.9):
             continue
         x0, x1 = int(ln['x0'] * w), int(min(w, ln['x1'] * w + 1))
         y0, y1 = int(ln['y0'] * h), int(min(h, ln['y1'] * h + 1))
-        ring = np.concatenate([a[max(0, y0 - 2):y0, x0:x1].reshape(-1, 3), a[y1:y1 + 2, x0:x1].reshape(-1, 3),
-                               a[y0:y1, max(0, x0 - 2):x0].reshape(-1, 3), a[y0:y1, x1:x1 + 2].reshape(-1, 3)])
-        if not len(ring):
-            continue
-        c = np.median(ring, axis=0)
-        if c.mean() < 200 or c.max() - c.min() > 60:
+        ring = [px.get(x, y) for x in range(x0, x1) for y in (*range(max(0, y0 - 2), y0), *range(y1, min(h, y1 + 2)))]
+        ring += [px.get(x, y) for y in range(y0, y1) for x in (*range(max(0, x0 - 2), x0), *range(x1, min(w, x1 + 2)))]
+        c = _median(ring)
+        if c and (sum(c) / 3 < 200 or max(c) - min(c) > 60):
             ln['kind'] = 'keep'
 
 
 def _differs(a, b):
     """نسبة مساحة الصفحة التي يختلف لونها بوضوح بين صورتين صغيرتين: شريط ملوّن رفيع بلون آخر يكفي للتفريق، وبقايا
     محو النص لا تكفي."""
-    import numpy as np
-    return float((np.abs(a - b).mean(axis=2) > 25).mean())
+    cells = diff = 0
+    for ra, rb in zip(a, b):
+        for ca, cb in zip(ra, rb):
+            cells += 1
+            diff += _gap(ca, cb) > 25
+    return diff / max(1, cells)
 
 
-def _plain(a):
+def _plain(px):
     """صفحة بيضاء تماماً تقريباً (الخلفية الفاتحة والشعار الصغير والخط الرفيع تصميم يُحفظ)."""
-    white = (a >= 252.5).all(axis=2).mean()
-    return white > 0.997
+    b = px.buf
+    white = total = 0
+    for y in range(px.h):
+        o = y * px.stride
+        for x in range(px.w):
+            i = o + x * 4
+            total += 1
+            white += b[i] >= 253 and b[i + 1] >= 253 and b[i + 2] >= 253
+    return white / max(1, total) > 0.997
 
 
 def _sig_size(rec):
@@ -342,8 +388,8 @@ def design_image(doc, rec, dpi=DPI):
     k = dpi / 25.4
     w, h = int(rec['w_mm'] * k), int(rec['h_mm'] * k)
     scale = min(1.0, 2200 / max(w, h))          # الصفحات الكبيرة جداً لا تتجاوز 2200 نقطة
-    a = _to_array(_render(doc, rec, (max(1, int(w * scale)), max(1, int(h * scale)))))
-    return _to_image(_erase(a, rec))
+    px = Pix(_render(doc, rec, (max(1, int(w * scale)), max(1, int(h * scale)))))
+    return _erase(px, rec).image()
 
 
 def _png(img):
@@ -385,12 +431,11 @@ def analyse(path, progress=None):
     for i, idx in enumerate(scan):
         rec = pages[idx]
         try:
-            a = _to_array(_render(doc, rec, _sig_size(rec)))
-            _band_text(a, rec)
-            a = _erase(a, rec)
-            rec['plain'] = _plain(a)
-            h4, w4 = a.shape[0] // 4 * 4, a.shape[1] // 4 * 4
-            sigs[idx] = a[:h4, :w4].reshape(h4 // 4, 4, w4 // 4, 4, 3).mean(axis=(1, 3))
+            px = Pix(_render(doc, rec, _sig_size(rec)))
+            _band_text(px, rec)
+            _erase(px, rec)
+            rec['plain'] = _plain(px)
+            sigs[idx] = px.small(4)
         except Exception:  # noqa: BLE001 — no picture of this page (or no Qt reader): it counts as a plain page
             rec['plain'] = True
             sigs[idx] = None
