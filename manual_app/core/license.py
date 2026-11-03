@@ -125,8 +125,19 @@ def _run_quiet(cmd):
 _BAD = ('', 'none', 'to be filled by o.e.m.', 'default string', 'not applicable', 'n/a', '0')
 
 
+_KNOWN = {}          # cache_dir -> fingerprint: the computer does not change while the program runs
+
+
 def machine_fingerprint(cache_dir=None):
-    """16 characters tied to this computer: motherboard serial → Windows MachineGuid → network card."""
+    """16 characters tied to this computer. Worked out once per run: reading the motherboard serial starts
+    PowerShell, which takes about a second each time."""
+    if cache_dir not in _KNOWN:
+        _KNOWN[cache_dir] = _read_fingerprint(cache_dir)
+    return _KNOWN[cache_dir]
+
+
+def _read_fingerprint(cache_dir=None):
+    """Motherboard serial → Windows MachineGuid → network card."""
     raw = ''
     if IS_WIN:
         raw = _run_quiet(['powershell', '-NoProfile', '-Command',

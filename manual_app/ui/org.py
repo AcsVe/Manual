@@ -185,7 +185,16 @@ class OrgTab(QWidget):
             self.tree.setCurrentItem(items[target])
         self.draw()
 
+    def showEvent(self, e):
+        super().showEvent(e)
+        if getattr(self, '_draw_pending', False):
+            self.draw()
+
     def draw(self):
+        # drawn only while the page is shown: measuring the names loads the fonts, which would slow opening a manual
+        self._draw_pending = not self.isVisible()
+        if self._draw_pending:
+            return
         if not self.mid:
             self.svg.load(QByteArray(b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>'))
             return

@@ -190,7 +190,7 @@ class Database:
                 d[c] = _j(d[c], [] if c == 'rows' else {})
         return d
 
-    def _save(self, table, data, row_id=None, json_cols=(), stamp=True):
+    def _save(self, table, data, row_id=None, json_cols=(), stamp=True, commit=True):
         data = dict(data)
         for c in json_cols:
             if c in data and not isinstance(data[c], str):
@@ -211,7 +211,8 @@ class Database:
             cur = self.conn.execute(f'INSERT INTO {table} ({", ".join(data)}) VALUES ({", ".join("?" * len(data))})',
                                     tuple(data.values()))
             row_id = cur.lastrowid
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return row_id
 
     def set_active(self, table, ids, active):
@@ -427,12 +428,13 @@ class Database:
         return bid
 
     def replace_blocks(self, section_id, blocks):
-        """Saves the whole content of a section at once (the editor's «save»)."""
+        """Saves the whole content of a section at once (the editor's «save»), in one transaction: faster than one
+        write per block, and the section is never left half saved."""
         self.conn.execute('DELETE FROM blocks WHERE section_id = ?', (section_id,))
         for i, b in enumerate(blocks):
             b = dict(b, section_id=section_id, sort=(i + 1) * 10)
             b.pop('id', None)
-            self._save('blocks', b, None, ('data', 'style'), stamp=False)
+            self._save('blocks', b, None, ('data', 'style'), stamp=False, commit=False)
         self.conn.execute('UPDATE sections SET updated_at = ? WHERE id = ?', (now(), section_id))
         self.conn.commit()
 

@@ -1151,11 +1151,23 @@ class Preview(QWidget):
         self.auto = QCheckBox(L('تحديث تلقائي', 'Update automatically'))
         self.auto.setChecked(True)
         self.state = muted('')
+        # going to a page: its order among the pages shown (with «the whole manual», the page order of the PDF)
+        self.page_no = QSpinBox()
+        self.page_no.setRange(1, 1)
+        self.page_no.setKeyboardTracking(False)
+        self.page_no.setEnabled(False)
+        fit(self.page_no, 80)
+        a11y(self.page_no, L('رقم الصفحة', 'Page number'))
+        self.page_no.valueChanged.connect(self.go_to_page)
+        self.page_of = muted('')
         top = QHBoxLayout()
         top.addWidget(self.scope)
         top.addWidget(refresh)
         top.addWidget(self.auto)
         top.addStretch(1)
+        top.addWidget(muted(L('صفحة', 'Page')))
+        top.addWidget(self.page_no)
+        top.addWidget(self.page_of)
         top.addWidget(self.state)
         self.lay = QVBoxLayout(self)
         self.lay.setContentsMargins(0, 0, 0, 0)
@@ -1206,12 +1218,38 @@ class Preview(QWidget):
 
         def ready(n):
             if n:
+                self._page_count(int(n))
                 self.view.page().runJavaScript(PICK_JS)
                 if getattr(self, '_scroll_back', None):
                     self.view.page().runJavaScript(f'window.scrollTo(0,{int(self._scroll_back)})')
             elif tries < 40:
                 QTimer.singleShot(250, lambda: self._arm(tries + 1))
         self.view.page().runJavaScript("document.querySelectorAll('.pagedjs_page').length", 0, ready)
+
+    def _page_count(self, n):
+        """Paged.js keeps adding pages after the first ones appear: the count is read again until it stops growing."""
+        self.page_no.blockSignals(True)
+        self.page_no.setRange(1, max(1, n))
+        self.page_no.blockSignals(False)
+        self.page_no.setEnabled(n > 0)
+        self.page_of.setText(L(f'من {n}', f'of {n}'))
+        if self.view is None:
+            return
+
+        def again(m):
+            if m and int(m) != n:
+                self._page_count(int(m))
+        QTimer.singleShot(700, lambda: self.view is not None and self.view.page().runJavaScript(
+            "document.querySelectorAll('.pagedjs_page').length", 0, again))
+
+    def go_to_page(self, n=None):
+        """Brings page ``n`` (its order in the preview, from 1) to the top of the preview."""
+        if self.view is None:
+            return
+        n = int(n or self.page_no.value())
+        self.view.page().runJavaScript(
+            f"(function(){{var p=document.querySelectorAll('.pagedjs_page')[{n - 1}];"
+            f"if(p)window.scrollTo(0,p.getBoundingClientRect().top+window.scrollY-8);}})()")
 
     def show_html(self, html, page_w=None):
         import hashlib
@@ -1418,7 +1456,11 @@ class EditorTab(QWidget):
         self.reload_tree()
         self._show_editor(False)
         self._perms()
-        if m:
+        if m and self.tree.topLevelItemCount():
+            # the first section opens (and the preview lays out that section only): laying out the whole manual
+            # at every opening made a long manual slow to open
+            self.tree.setCurrentItem(self.tree.topLevelItem(0))
+        elif m:
             self.refresh_preview(force=True)
 
     def reload_tree(self, select=None):
@@ -1485,10 +1527,7 @@ class EditorTab(QWidget):
             return
         self.sid = sid
         self.form.load(s)
-        _clear_layout(self.block_list)
-        self.blocks = []
-        for b in self.db.blocks(sid):
-            self._append_block(b)
+        self._reload_blocks()
         has_blocks = s['kind'] not in ('cover', 'toc')
         self.blocks_box.setVisible(has_blocks)
         self.dirty = False
@@ -1561,8 +1600,7 @@ class EditorTab(QWidget):
     def _touch(self):
         self.dirty = True
         self.saved_label.setText(L('تعديلات غير محفوظة', 'Unsaved changes'))
-        if self.preview.auto.isChecked():
-            self._ptimer.start()
+        self._preview_soon()
 
     def save(self, quiet=False):
         if not self.sid or not self.ctx.can('edit'):
@@ -1832,8 +1870,15 @@ class EditorTab(QWidget):
 
     # ── preview ──────────────────────────────────────────────────────
     def _preview_soon(self):
-        if self.preview.auto.isChecked():
-            self._ptimer.start()
+        if not self.preview.auto.isChecked():
+            return
+        if self.preview.scope.currentData() == 'all':
+            # laying out a long manual takes many seconds (about 30 for 230 pages): it is not done again at every
+            # pause in typing, only when asked
+            self.preview.state.setText(L('في الدليل تعديلات لم تظهر بعد: اضغط «تحديث المعاينة»',
+                                         'The manual has changes not shown yet: press «Refresh the preview»'))
+            return
+        self._ptimer.start()
 
     def refresh_preview(self, force=False):
         if not self.mid or (not force and not self.preview.auto.isChecked()):

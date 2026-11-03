@@ -306,6 +306,23 @@ class SettingsTab(QWidget):
         gb.setColumnStretch(1, 1)
         g_bk = card(L('النسخ الاحتياطي (يومياً عند فتح البرنامج، وتُحفظ آخر 30 نسخة)', 'Backups (daily when the program opens; the last 30 are kept)'))
         g_bk.setLayout(gb)
+        init_btn = button(L('تهيئة النظام…', 'Initialise the system…'), 'reset')
+        init_btn.clicked.connect(self.initialise)
+        gi = QVBoxLayout()
+        gi.addWidget(hint(L('تحذف الملفات المؤقتة التي يصنعها البرنامج أثناء العمل (صفحات المعاينة والتصدير، وسجلات '
+                            'الأخطاء، وذاكرة المعاينة)، وتغلق النوافذ المعلّقة، وتفحص ملف البيانات وترتّبه. لا تمسّ '
+                            'الأدلة ولا الصور ولا النسخ الاحتياطية ولا الترخيص ولا الإعدادات. يُنصح بها عند بطء '
+                            'البرنامج أو ظهور معاينة قديمة.',
+                            'Deletes the temporary files the program makes while it works (the preview and export pages, '
+                            'the error logs, the preview store), closes windows left open, and checks and tidies the data '
+                            'file. The manuals, pictures, backups, licence and settings are not touched. Useful when the '
+                            'program is slow or the preview shows an old copy.')))
+        ir = QHBoxLayout()
+        ir.addWidget(init_btn)
+        ir.addStretch(1)
+        gi.addLayout(ir)
+        g_init = card(L('تهيئة النظام', 'System initialisation'))
+        g_init.setLayout(gi)
         lic_btn = button(L('ترخيص الاستخدام…', 'Licence…'), 'key')
         lic_btn.clicked.connect(lambda: LicenseDialog(self, ctx).exec())
         save = button(L('حفظ الإعدادات', 'Save settings'), 'save', 'primary')
@@ -316,6 +333,7 @@ class SettingsTab(QWidget):
         il.setContentsMargins(0, 0, 0, 0)
         il.addWidget(g_gen)
         il.addWidget(g_bk)
+        il.addWidget(g_init)
         row = QHBoxLayout()
         row.addWidget(save)
         row.addWidget(lic_btn)
@@ -361,6 +379,48 @@ class SettingsTab(QWidget):
             return
         info(self, L(f'تم الاسترجاع. نسخة البيانات السابقة:\n{safety}', f'Restored. The previous data was saved to:\n{safety}'))
         self.ctx.window.manual_changed()
+
+    def initialise(self):
+        if not confirm(self, L('ستُحذف الملفات المؤقتة وسجلات الأخطاء، وتُغلق النوافذ المفتوحة، ويُفحص ملف البيانات. '
+                               'يُحفظ ما تكتبه في المحرر أولاً، ولا تُمسّ الأدلة ولا النسخ الاحتياطية. متابعة؟',
+                               'The temporary files and error logs will be deleted, open windows closed and the data file '
+                               'checked. What is being written in the editor is saved first; the manuals and backups are not '
+                               'touched. Continue?')):
+            return
+        from PySide6.QtWidgets import QApplication, QDialog
+        from ..core import cleanup
+        win = self.ctx.window
+        if win is not None:
+            if win.editor.dirty:
+                win.editor.save(quiet=True)
+            win.editor.preview.inspector.hide()
+        for w in QApplication.topLevelWidgets():          # windows left open behind (a form never closed)
+            if isinstance(w, QDialog) and w.isVisible():
+                w.reject()
+        try:
+            from PySide6.QtWebEngineCore import QWebEngineProfile
+            QWebEngineProfile.defaultProfile().clearHttpCache()
+        except ImportError:
+            pass
+        try:
+            done = cleanup.initialise(self.db, self.ctx.data_dir)
+        except Exception as e:  # noqa: BLE001 — reported, never hidden
+            error(self, L('تعذّرت التهيئة:', 'The initialisation failed:') + f'\n{e}')
+            return
+        self.db.audit('system_initialised', files=done['files'], bytes=done['bytes'])
+        if win is not None:
+            win.editor.preview._digest = None              # the preview is laid out again from a fresh page
+            win.manual_changed()
+        text = L(f'تمت التهيئة: حُذف {done["files"]} من الملفات والمجلدات المؤقتة، ورُتِّب ملف البيانات.',
+                 f'Done: {done["files"]} temporary file(s) and folder(s) deleted, and the data file tidied.')
+        if done['kept']:
+            text += '\n' + L(f'بقي {done["kept"]} ملفاً قيد الاستعمال، ويُحذف في التهيئة القادمة.',
+                             f'{done["kept"]} file(s) in use were left; they go at the next initialisation.')
+        if not done['db_ok']:
+            error(self, text + '\n\n' + L('وُجد خلل في ملف البيانات، فلم يُرتَّب. استرجع آخر نسخة احتياطية من الأعلى.',
+                                          'The data file has a fault, so it was not tidied. Restore the latest backup above.'))
+            return
+        info(self, text)
 
 
 class HomeTab(QWidget):
