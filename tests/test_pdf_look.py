@@ -136,3 +136,18 @@ def test_password_prompt_on_open(db, tmp_path, quiet, monkeypatch):
     assert mid, quiet
     text = ' '.join(b['en'] or '' for s in db.sections(mid) for b in db.blocks(s['id']))
     assert 'Policy text line' in text
+
+
+def test_a_failed_reading_is_told_and_kept(db, tmp_path, quiet, monkeypatch):
+    pdf = tmp_path / 'two.pdf'
+    _two_designs(pdf)
+    ctx = Ctx(db)
+    ctx.data_dir = str(tmp_path / 'data')
+
+    def boom(*_a, **_k):
+        raise RuntimeError('reading failed on purpose')
+    monkeypatch.setattr(pdf_look, 'analyse', boom)
+    assert manuals_mod.open_file(None, ctx, str(pdf)) is None            # the person said no: nothing is made
+    assert 'تعذّرت قراءة تصميم' in quiet[-1] and 'open-file.log' in quiet[-1]
+    assert 'reading failed on purpose' in (tmp_path / 'data' / 'logs' / 'open-file.log').read_text(encoding='utf-8')
+    assert not db.manuals(active_only=False)

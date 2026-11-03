@@ -202,7 +202,7 @@ class _Stopped(Exception):
     """Reading the file was stopped from its progress window."""
 
 
-def _read_pdf(parent, path):
+def _read_pdf(parent, ctx, path):
     """Opens a PDF for reading with its look: asks for its password when it has one, mends a damaged file where it
     can, and reads the design of its pages (with a progress window). Returns (path to read, look or None, temporary
     file or None), or None when the file is not opened (no password given, stopped, unreadable)."""
@@ -250,17 +250,44 @@ def _read_pdf(parent, path):
         if tmp:
             os.remove(tmp)
         return None
-    except Exception:  # noqa: BLE001 — the text is still read, without the look
+    except Exception:  # noqa: BLE001 — the text is still read; the reason is told and kept
+        box.close()
+        where = _log_failure(ctx, path)
+        if not confirm(parent, L('تعذّرت قراءة تصميم صفحات هذا الملف، فلن يحتفظ بشكله الأصلي.\n'
+                                 'هل تريد فتح نصه بالتصميم الافتراضي للبرنامج؟\n\n'
+                                 'حُفظت تفاصيل الخطأ في الملف:\n', 'The design of this file\'s pages could not be read, so it '
+                                 'will not keep its original look.\nOpen its text with the program\'s own design?\n\n'
+                                 'The details were saved in:\n') + where):
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
+            return None
         look = None
     box.close()
     return use, look, tmp
+
+
+def _log_failure(ctx, path):
+    """Writes what went wrong while reading a file to «logs» in the data folder; returns the log file."""
+    import datetime
+    import traceback
+    folder = os.path.join(getattr(ctx, 'data_dir', None) or os.path.dirname(path), 'logs')
+    try:
+        os.makedirs(folder, exist_ok=True)
+        log = os.path.join(folder, 'open-file.log')
+        from .. import __version__
+        with open(log, 'a', encoding='utf-8') as f:
+            f.write(f'--- {datetime.datetime.now():%Y-%m-%d %H:%M:%S}  {__version__}  {os.path.basename(path)}\n')
+            f.write(traceback.format_exc() + '\n')
+        return log
+    except OSError:
+        return traceback.format_exc()[-600:]
 
 
 def _bring_in_pdf(parent, ctx, mid, parent_sid, path, mode, kind='text', pages=None, image_pages=()):  # noqa: PLR0913
     """A PDF with its look (pdf_look): mode «manual» for a manual opened from the file, «sections» for a file
     imported into a manual. Returns what _bring_in returns, or None."""
     from ..core import pdf_look
-    read = _read_pdf(parent, path)
+    read = _read_pdf(parent, ctx, path)
     if not read:
         return None
     use, look, tmp = read

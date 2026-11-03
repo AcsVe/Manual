@@ -111,7 +111,17 @@ def _pages(path, tick=None):
     dev = PDFPageAggregator(rm, laparams=LAParams(line_margin=0.4))
     interp = PDFPageInterpreter(rm, dev)
     with open(path, 'rb') as f:
-        for no, page in enumerate(PDFPage.get_pages(f), 1):
+        pages_iter = PDFPage.get_pages(f)
+        no = 0
+        while True:
+            try:
+                page = next(pages_iter)
+            except StopIteration:
+                break
+            except Exception:  # noqa: BLE001 — the rest of the file cannot be walked: those pages come in as they are
+                out.extend(_qt_rest(path, no))
+                break
+            no += 1
             if tick:
                 tick()
             rec = {'no': no, 'lines': [], 'chars': 0, 'bad': 0}
@@ -177,6 +187,19 @@ def _color(chars):
     except (TypeError, ValueError):
         return None
     return '#%02X%02X%02X' % tuple(int(round(min(1, max(0, x)) * 255)) for x in (r, g, b))
+
+
+def _qt_rest(path, after):
+    """Pages after ``after`` that pdfminer cannot reach: their size from Qt, marked unreadable (whole pages)."""
+    doc = _qt_doc(path)
+    out = []
+    if doc is None:
+        return out
+    for i in range(after, doc.pageCount()):
+        sz = doc.pagePointSize(i)
+        out.append({'no': i + 1, 'lines': [], 'chars': 0, 'bad': 1, 'w_mm': sz.width() * MM, 'h_mm': sz.height() * MM,
+                    'landscape': sz.width() > sz.height()})
+    return out
 
 
 def _private(t):
@@ -334,7 +357,6 @@ def _png(img):
 # ── التحليل ───────────────────────────────────────────────────────────────────────────────────────────
 def analyse(path, progress=None):
     """يحلّل الملف ويرجع وصف شكله (انظر أعلى الملف). progress(تم، الكل) اختياري."""
-    import numpy as np
     from .importer import pdf_page_count
     total = pdf_page_count(path)
     steps = {'done': 0, 'total': total + min(total, MAX_SCAN)}
@@ -361,15 +383,16 @@ def analyse(path, progress=None):
     sigs = {}
     for i, idx in enumerate(scan):
         rec = pages[idx]
-        if doc is not None:
+        try:
             a = _to_array(_render(doc, rec, _sig_size(rec)))
             _band_text(a, rec)
             a = _erase(a, rec)
             rec['plain'] = _plain(a)
-            small = a.reshape(a.shape[0] // 4, 4, a.shape[1] // 4, 4, 3).mean(axis=(1, 3))
-            sigs[idx] = small
-        else:
+            h4, w4 = a.shape[0] // 4 * 4, a.shape[1] // 4 * 4
+            sigs[idx] = a[:h4, :w4].reshape(h4 // 4, 4, w4 // 4, 4, 3).mean(axis=(1, 3))
+        except Exception:  # noqa: BLE001 — no picture of this page (or no Qt reader): it counts as a plain page
             rec['plain'] = True
+            sigs[idx] = None
         tick()
     # المجموعات: صفحات بالاتجاه نفسه وتصميم متقارب
     groups = []
@@ -377,7 +400,8 @@ def analyse(path, progress=None):
         rec = pages[idx]
         for g in groups:
             if g['landscape'] == rec['landscape'] and g['plain'] == rec['plain'] and \
-                    (rec['plain'] or _differs(sigs[g['rep']], sigs[idx]) < SAME):
+                    (rec['plain'] or (sigs[idx] is not None and sigs[g['rep']] is not None
+                                      and _differs(sigs[g['rep']], sigs[idx]) < SAME)):
                 g['pages'].append(rec['no'])
                 rec['group'] = g['id']
                 break

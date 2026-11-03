@@ -131,8 +131,29 @@ def selftest(out):
     docx = export_docx(ctx.db, mid, os.path.join(folder, 'test.docx'))
     web = build_html(ctx.db, mid, 'web')
     ok = ok and pages >= 5 and os.path.getsize(docx) > 5000 and 'دليل تجريبي' in web
+    look_note = 'look=skipped'
+    if ok:                                       # reading a PDF with its look, also one protected by a password
+        try:
+            from pypdf import PdfReader, PdfWriter
+            from .core import pdf_look
+            locked = os.path.join(folder, 'locked.pdf')
+            w = PdfWriter(clone_from=PdfReader(pdf))
+            w.encrypt(user_password='1234', owner_password='o', algorithm='AES-256')
+            w.write(locked)
+            use, _tmp, _note = pdf_look.prepare(locked, '1234')
+            look = pdf_look.analyse(use)
+            gid = next(iter(look['groups']))
+            design = pdf_look.group_design(look, gid)
+            pdf_look.close(look)
+            look_ok = look['n'] == pages and bool(look['groups'])
+            look_note = f'look={"ok" if look_ok else "FAILED"} groups={len(look["groups"])} design={bool(design)}'
+            ok = ok and look_ok
+        except Exception:  # noqa: BLE001 — the build fails and shows why
+            import traceback
+            look_note = 'look=FAILED ' + traceback.format_exc().replace('\n', ' | ')
+            ok = False
     with open(out, 'w', encoding='utf-8') as f:
-        f.write(('ok ' if ok else 'FAILED ') + f'pages={pages} {msg} ' + lic.machine_fingerprint(folder) + '\n')
+        f.write(('ok ' if ok else 'FAILED ') + f'pages={pages} {msg} {look_note} ' + lic.machine_fingerprint(folder) + '\n')
     ctx.db.close()
     return 0 if ok else 1
 

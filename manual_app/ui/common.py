@@ -30,17 +30,36 @@ def norm(v):
     return s.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
 
 
+def _message(parent, title, text, icon, choices):
+    """A message with the program's own buttons: their names written out (not Qt's translations) and the
+    program's control height, so an Arabic word is never cut at the bottom of its button."""
+    from .theme import size_tree
+    box = QMessageBox(icon, title, text, QMessageBox.NoButton, parent)
+    made = []
+    for label, role in choices:
+        b = box.addButton(label, role)
+        b.setAccessibleName(label)
+        b.setCursor(Qt.PointingHandCursor)
+        b.setMinimumWidth(90)
+        made.append(b)
+    box.setDefaultButton(made[-1])
+    box.setEscapeButton(made[-1])
+    size_tree(box)
+    box.exec()
+    return made.index(box.clickedButton()) if box.clickedButton() in made else len(made) - 1
+
+
 def info(parent, text):
-    QMessageBox.information(parent, L('تنبيه', 'Notice'), text)
+    _message(parent, L('تنبيه', 'Notice'), text, QMessageBox.Information, [(L('حسناً', 'OK'), QMessageBox.AcceptRole)])
 
 
 def error(parent, text):
-    QMessageBox.warning(parent, L('خطأ', 'Error'), text)
+    _message(parent, L('خطأ', 'Error'), text, QMessageBox.Warning, [(L('حسناً', 'OK'), QMessageBox.AcceptRole)])
 
 
 def confirm(parent, text):
-    return QMessageBox.question(parent, L('تأكيد', 'Confirm'), text,
-                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+    return _message(parent, L('تأكيد', 'Confirm'), text, QMessageBox.Question,
+                    [(L('نعم', 'Yes'), QMessageBox.YesRole), (L('لا', 'No'), QMessageBox.NoRole)]) == 0
 
 
 SORT_ROLE = Qt.UserRole + 1
