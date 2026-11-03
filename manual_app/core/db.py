@@ -416,6 +416,12 @@ class Database:
         return [self._row(r, ('data', 'style')) for r in
                 self.conn.execute('SELECT * FROM blocks WHERE section_id = ? ORDER BY sort, id', (section_id,))]
 
+    def block_fonts(self, manual_id):
+        """The fonts chosen for single blocks of a manual (the panel on the preview: «الخط»)."""
+        rows = self.conn.execute("SELECT DISTINCT json_extract(b.style, '$.font') FROM blocks b JOIN sections s "
+                                 "ON s.id = b.section_id WHERE s.manual_id = ? AND json_valid(b.style)", (manual_id,))
+        return {r[0] for r in rows if isinstance(r[0], str) and r[0]}
+
     def save_block(self, data, block_id=None):
         if not block_id and 'sort' not in data:
             r = self.conn.execute('SELECT COALESCE(MAX(sort), 0) + 10 FROM blocks WHERE section_id = ?',

@@ -14,7 +14,7 @@ from docx.shared import Mm, Pt, RGBColor
 
 from . import orgchart
 from .db import CONTROL_STATUSES
-from .html import DEFAULT_DISCLAIMER, LABELS
+from .html import DEFAULT_DISCLAIMER, LABELS, block_font
 from .richtext import lines, runs
 from .templates import FONTS, PAGE_SIZES, layout_with_defaults
 
@@ -96,6 +96,7 @@ class DocxExporter:
         self.font_ar = f['ar'] if f['ar'] not in FONTS or f['ar'] in ('Amiri', 'Cairo', 'Tajawal') else 'Arial'
         self.font_en = f['en'] if f['en'] not in FONTS else 'Calibri'
         self.c = self.lay['colors']
+        self._st = {}                # the look of the block being written (colour, size, bold, alignment, font)
         self.doc = Document()
 
     def label(self, key):
@@ -115,6 +116,26 @@ class DocxExporter:
         _set_rtl(paragraph, rtl)
         if not rtl:
             paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        st = self._st                # the block's own look, as in the PDF
+        al = st.get('align')
+        if al in ('right', 'left'):
+            # Word reads «left» and «right» of a right-to-left paragraph as its start and its end
+            phys = {'right': WD_ALIGN_PARAGRAPH.RIGHT, 'left': WD_ALIGN_PARAGRAPH.LEFT}
+            paragraph.alignment = phys[{'right': 'left', 'left': 'right'}[al] if rtl else al]
+        elif al == 'center':
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        elif al == 'justify':
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        try:
+            pct = int(st.get('size') or 100)
+        except (TypeError, ValueError):
+            pct = 100
+        if pct != 100 and 50 <= pct <= 300:
+            size = (size or float(self.lay['fonts']['size'])) * pct / 100
+        bold = bold or bool(st.get('bold'))
+        if isinstance(st.get('color'), str) and len(st['color']) == 7:
+            color = st['color']
+        bf = block_font(st)
         for t, f in runs(text) if ('<' in (text or '')) else [(text or '', {})]:
             if t == '\n':
                 paragraph.add_run().add_break()
@@ -129,9 +150,9 @@ class DocxExporter:
             if col:
                 r.font.color.rgb = _rgb(col)
             if rtl:
-                _run_rtl(r, self.font_ar)
+                _run_rtl(r, bf or self.font_ar)
             else:
-                r.font.name = self.font_en
+                r.font.name = bf or self.font_en
 
     def pair(self, container, ar, en, size=None, bold=False, color=None, style=None):
         """One piece of text in the manual's language mode (side by side = a two-column table without borders)."""
@@ -415,6 +436,13 @@ class DocxExporter:
     k_image = k_text
 
     def block(self, b):
+        self._st = b.get('style') or {}
+        try:
+            self._block(b)
+        finally:
+            self._st = {}
+
+    def _block(self, b):
         k, d = b['kind'], b.get('data') or {}
         ar, en = b.get('ar') or '', b.get('en') or ''
         if k == 'heading':

@@ -458,7 +458,7 @@ class Inspector(QFrame):
             def fn(bl):
                 stl = dict(bl[i].get('style') or {})
                 for k, v in kw.items():
-                    if v in (None, '', 100) and k in ('color', 'align', 'size'):
+                    if v in (None, '', 100) and k in ('color', 'align', 'size', 'font'):
                         stl.pop(k, None)
                     else:
                         stl[k] = v
@@ -475,9 +475,21 @@ class Inspector(QFrame):
             bold = QCheckBox(L('غامق', 'Bold'))
             bold.setChecked(bool(st.get('bold')))
             bold.toggled.connect(lambda v: set_style(bold=v))
+            from .fonts import FontPicker
+            font = FontPicker(inherit=L('كخط الدليل', 'As the manual'))
+            font.set_value(st.get('font') or '')
+            fit(font, 240)
+            a11y(font, L('خط هذه الكتلة', 'Font of this block'))
+            chosen = [st.get('font') or '']
+
+            def new_font(*_):
+                if font.value() != chosen[0]:            # a heading row of the list chooses nothing
+                    chosen[0] = font.value()
+                    set_style(font=chosen[0])
+            font.currentIndexChanged.connect(new_font)
             rows += [(L('لون النص', 'Text colour'), self._color_row(L('لون النص', 'Text colour'), st.get('color'),
                                                                     lambda v: set_style(color=v))),
-                     (L('حجم النص', 'Text size'), size), (None, bold)]
+                     (L('الخط', 'Font'), font), (L('حجم النص', 'Text size'), size), (None, bold)]
         if b['kind'] not in ('pagebreak',):
             align = QComboBox()
             for k, (ar, en) in BLOCK_ALIGN.items():

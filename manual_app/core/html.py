@@ -140,6 +140,12 @@ FONT_RANGES = (('arabic', 'U+0600-06FF,U+0750-077F,U+0870-08FF,U+FB50-FDFF,U+FE7
                ('latin', 'U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+2000-206F,U+20AC,U+2122,U+2190-2193,U+2212'))
 
 
+def block_font(style):
+    """The font chosen for one block, when it is a font name that is safe inside CSS; else None."""
+    f = (style or {}).get('font')
+    return f if isinstance(f, str) and re.fullmatch(r"[\w .\-]{1,64}", f) else None
+
+
 def app_root():
     return getattr(sys, '_MEIPASS', os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -160,8 +166,10 @@ def _b64(data, mime):
 class Renderer:
     """Builds the HTML of one manual. ``embed``: fonts inside the file (web copy) instead of next to it."""
 
-    def __init__(self, db, manual_id, mode='print', embed=False, only=None, workflow=False, draft=False):
+    def __init__(self, db, manual_id, mode='print', embed=False, only=None, workflow=False, draft=False, window=None):
         self.db, self.mode, self.embed, self.draft = db, mode, embed, draft
+        # the preview of a long section shows only the blocks open in the editor: {section id: (first, stop)}
+        self.window = window or {}
         self.m = db.manual(manual_id)
         self.lay = layout_with_defaults(self.m['layout'])
         self.lm = self.lay['lang_mode']
@@ -319,7 +327,7 @@ class Renderer:
     def font_faces(self):
         css = []
         folder = os.path.join(assets_dir(), 'fonts')
-        used = {self.lay['fonts']['ar'], self.lay['fonts']['en'], 'Tajawal'}
+        used = {self.lay['fonts']['ar'], self.lay['fonts']['en'], 'Tajawal'} | self.db.block_fonts(self.m['id'])
         for fam in used:
             slug = FONTS.get(fam)
             if not slug:
@@ -544,7 +552,7 @@ class Renderer:
   --ts:{c.get('table_stripe', '#F6F9FD')};--tb:{c.get('table_border', c['box_border'])};--ttx:{c.get('table_text', c['text'])}}}
 html{{font-family:"{f['ar']}","{f['en']}",Tajawal,"MB symbols-2","MB symbols-1","MB symbols-math",Arial,sans-serif;font-size:{f['size']}pt;line-height:{f['line']};color:var(--t)}}
 body{{margin:0}} body.rtl .sec,body.rtl .chapter-page,body.rtl .toc{{direction:rtl}} body.rtl table.t{{direction:rtl}} body.rtl table.t.mirrored{{direction:ltr}}
-.en,.en *{{font-family:"{f['en']}","{f['ar']}","MB symbols-2","MB symbols-1","MB symbols-math",Arial,sans-serif}}
+.en,.en *{{font-family:var(--bf,"{f['en']}"),"{f['ar']}","MB symbols-2","MB symbols-1","MB symbols-math",Arial,sans-serif}}
 .ar{{text-align:{AL[0]};direction:rtl}} .en{{text-align:{AL[1]};direction:ltr}}
 .al-right .ar,.al-right .en,.figure.al-right{{text-align:right}} .al-left .ar,.al-left .en,.figure.al-left{{text-align:left}}
 .al-center .ar,.al-center .en,.figure.al-center{{text-align:center}} .al-justify .ar,.al-justify .en{{text-align:justify}}
@@ -1007,7 +1015,10 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         run = None
         so = (s.get('style') or {}).get('orientation')
         base = 'T' if so in ('portrait', 'landscape') and so != self.lay['orientation'] else 'N'
+        win = self.window.get(s['id'])
         for i, b in enumerate(self.db.blocks(s['id'])):
+            if win and not win[0] <= i < win[1]:
+                continue                 # each block keeps its own number in the section (data-b)
             self._bref = f'{s["id"]}:{i}'
             if self.mode == 'print':
                 run = self.run_of(b, run, base)
@@ -1070,6 +1081,8 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
             css.append(f'font-size:{size}%')
         if st.get('bold'):
             css.append('font-weight:700')
+        if block_font(st):                     # a font for this block only (the program's own, or one in Windows)
+            css.append(f"--bf:'{st['font']}';font-family:'{st['font']}'")     # --bf: the English text inside too
         return ';'.join(css) + (';' if css else '')
 
     def block(self, b):
@@ -1240,7 +1253,8 @@ def draft_uri(a, side=1300):
     return uri
 
 
-def build_html(db, manual_id, mode='print', embed=None, only=None, workflow=False, draft=False):
-    """``draft``: the on-screen preview (large pictures made smaller); never for an export."""
+def build_html(db, manual_id, mode='print', embed=None, only=None, workflow=False, draft=False, window=None):
+    """``draft``: the on-screen preview (large pictures made smaller); never for an export. ``window``: the preview
+    only — {section id: (first, stop)} limits a long section to the blocks open in the editor."""
     return Renderer(db, manual_id, mode, embed=(mode == 'web') if embed is None else embed, only=only,
-                    workflow=workflow, draft=draft).render()
+                    workflow=workflow, draft=draft, window=window).render()

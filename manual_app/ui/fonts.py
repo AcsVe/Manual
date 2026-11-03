@@ -31,9 +31,11 @@ def is_installed(fam):
 class FontPicker(QComboBox):
     """A font list: the program's fonts first, then the installed ones; a search by typing."""
 
-    def __init__(self, arabic=False, parent=None):
+    def __init__(self, arabic=False, parent=None, inherit=None):
+        """``inherit``: the text of a first choice «as the manual» (its value is ''), for a font of one block."""
         super().__init__(parent)
         self.arabic = arabic
+        self.inherit = inherit
         self.setEditable(True)
         self.setInsertPolicy(QComboBox.NoInsert)
         self.setMaxVisibleItems(18)
@@ -58,6 +60,11 @@ class FontPicker(QComboBox):
             it.setFont(f)
             model.appendRow(it)
 
+        if self.inherit:
+            it = QStandardItem(self.inherit)
+            it.setData('', Qt.UserRole)
+            it.setData(False, SYSTEM_ROLE)
+            model.appendRow(it)
         head(L('خطوط البرنامج (تُضمَّن في كل ملف يُصدَّر)', "The program's fonts (inside every exported file)"))
         for fam in FONTS:
             it = QStandardItem(fam)
@@ -81,7 +88,7 @@ class FontPicker(QComboBox):
         return -1
 
     def set_value(self, fam):
-        r = self._row_of(fam)
+        r = self._row_of(fam if fam or not self.inherit else '')
         if r < 0 and fam:
             # a manual made on another computer: its font stays chosen and is marked, with nothing changed
             self.addItem(fam + L(' — غير مثبت على هذا الجهاز', ' — not installed on this computer'), fam)
@@ -89,6 +96,8 @@ class FontPicker(QComboBox):
         self.setCurrentIndex(max(self._row_of('Tajawal'), 0) if r < 0 else r)
 
     def value(self):
+        if self.inherit:
+            return self.currentData() or ''
         return self.currentData() or 'Tajawal'
 
     def is_system(self):

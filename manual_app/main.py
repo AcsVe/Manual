@@ -13,6 +13,35 @@ from .core import license as lic
 from .core.db import ROLES, Database
 
 
+_CRASH = None
+
+
+def _crash_log(folder):
+    """A sudden close leaves its place in «logs/crash.log» in the data folder (the Python stack at that moment, and
+    what Qt reported last), instead of only a line in the Windows event log."""
+    global _CRASH
+    import faulthandler
+    try:
+        logs = os.path.join(folder, 'logs')
+        os.makedirs(logs, exist_ok=True)
+        path = os.path.join(logs, 'crash.log')
+        if os.path.isfile(path) and os.path.getsize(path) > 1_000_000:
+            os.replace(path, path + '.old')
+        _CRASH = open(path, 'a', encoding='utf-8')
+        _CRASH.write(f'\n── {__version__} started {__import__("datetime").datetime.now():%Y-%m-%d %H:%M:%S}\n')
+        _CRASH.flush()
+        faulthandler.enable(_CRASH, all_threads=True)
+        from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+
+        def qt_message(kind, _ctx, text):
+            if kind in (QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+                _CRASH.write(f'Qt: {text}\n')
+                _CRASH.flush()
+        qInstallMessageHandler(qt_message)
+    except OSError:
+        pass
+
+
 def data_dir():
     if os.environ.get('MANUAL_DATA'):
         return os.environ['MANUAL_DATA']
@@ -235,6 +264,7 @@ def main(argv=None):
     except Exception as e:  # noqa: BLE001 — folder not writable, damaged database…
         QMessageBox.critical(None, 'ManualBuilder', f'تعذّر فتح مجلد البيانات / Cannot open the data folder:\n{data_dir()}\n\n{e}')
         return 1
+    _crash_log(ctx.data_dir)
     from .ui.common import set_lang
     set_lang(ctx.db.get('lang', 'ar'))
     if ctx.db.get('lang', 'ar') != 'en':

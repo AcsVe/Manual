@@ -33,12 +33,29 @@ PLACEHOLDERS = {
 
 
 # ── rich text ───────────────────────────────────────────────────────────────────────────────────────
+def _right_shift(e):
+    """True when the Shift held is the right one (Windows tells them apart; elsewhere by the key's scan code)."""
+    import sys
+    if sys.platform.startswith('win'):
+        try:
+            import ctypes
+            return bool(ctypes.windll.user32.GetKeyState(0xA1) & 0x8000) or e.nativeScanCode() == 0x36
+        except (AttributeError, OSError):
+            pass
+    return e.nativeScanCode() in (0x36, 62)
+
+
 class RichEdit(QTextEdit):
-    """A text box for one side of a block: bold/italic/underline/colour/links, stored as safe HTML."""
+    """A text box for one side of a block: bold/italic/underline/colour/links, stored as safe HTML.
+    ``align_requested('right'|'left')``: Ctrl with the right or the left Shift, as in Word (the block's alignment)."""
     focused = Signal(object)
+    align_requested = Signal(str)
 
     def __init__(self, rtl, placeholder=''):
         super().__init__()
+        self.rtl = rtl
+        self._align = ''
+        self._ctrl_shift = False
         self.setAcceptRichText(True)
         self.setLayoutDirection(Qt.RightToLeft if rtl else Qt.LeftToRight)
         opt = self.document().defaultTextOption()
@@ -73,6 +90,7 @@ class RichEdit(QTextEdit):
             self.insertHtml(clean(source.html()))
         else:
             super().insertFromMimeData(source)
+        self.apply_direction()                     # pasted lines bring an alignment of their own
 
     def set_value(self, html):
         html = html or ''
@@ -80,7 +98,45 @@ class RichEdit(QTextEdit):
             self.setHtml(html)
         else:
             self.setPlainText(html)
+        self.apply_direction()
         self._fit()
+
+    def apply_direction(self, align=None):
+        """Every line of the box in the direction of its side (Arabic from the right, English from the left) and in
+        the block's alignment, as the pages print it. Qt gives each loaded line a left alignment of its own, and reads a
+        line that starts with a number or a Latin word as left-to-right: the Arabic showed on the left, and such lines
+        reversed. AlignAbsolute: a plain «right» is mirrored to the left in a right-to-left line."""
+        from PySide6.QtGui import QTextBlockFormat, QTextOption
+        if align is not None:
+            self._align = align or ''
+        h = {'right': Qt.AlignRight | Qt.AlignAbsolute, 'left': Qt.AlignLeft | Qt.AlignAbsolute,
+             'center': Qt.AlignHCenter, 'justify': Qt.AlignJustify}.get(self._align)
+        if h is None:
+            h = (Qt.AlignRight if self.rtl else Qt.AlignLeft) | Qt.AlignAbsolute
+        direction = Qt.RightToLeft if self.rtl else Qt.LeftToRight
+        opt = self.document().defaultTextOption()
+        opt.setTextDirection(direction)
+        opt.setAlignment(h)
+        self.document().setDefaultTextOption(opt)
+        fmt = QTextBlockFormat()
+        fmt.setLayoutDirection(direction)
+        fmt.setAlignment(h)
+        was = self.blockSignals(True)               # the look of the box only: nothing to save
+        cur = QTextCursor(self.document())
+        cur.select(QTextCursor.Document)
+        cur.mergeBlockFormat(fmt)
+        self.blockSignals(was)
+
+    def keyPressEvent(self, e):                     # noqa: N802 (Qt name)
+        mods = e.modifiers()
+        self._ctrl_shift = (e.key() == Qt.Key_Shift and mods & Qt.ControlModifier) or                            (e.key() == Qt.Key_Control and mods & Qt.ShiftModifier)
+        super().keyPressEvent(e)
+
+    def keyReleaseEvent(self, e):                   # noqa: N802 (Qt name)
+        if self._ctrl_shift and e.key() in (Qt.Key_Shift, Qt.Key_Control):
+            self._ctrl_shift = False
+            self.align_requested.emit('right' if _right_shift(e) else 'left')
+        super().keyReleaseEvent(e)
 
     def value(self):
         if not self.toPlainText().strip():
@@ -606,6 +662,7 @@ class BlockWidget(QFrame):
             self.align.addItem(L(ar, en), k)
         self.align.setCurrentIndex(max(0, self.align.findData((block.get('style') or {}).get('align', ''))))
         self.align.currentIndexChanged.connect(lambda *_: self.changed.emit())
+        self.align.currentIndexChanged.connect(self._show_align)
         fit(self.align, 150)
         a11y(self.align, L('محاذاة النص', 'Text alignment'))
         add = icon_button('plus', L('إضافة كتلة بعد هذه الكتلة', 'Add a block after this one'))
@@ -625,6 +682,15 @@ class BlockWidget(QFrame):
         lay.addWidget(head)
         lay.addLayout(self.body)
         self._build()
+
+    def _align_to(self, side):
+        """Ctrl with the right or the left Shift: the block aligned to that side (saved, and printed so)."""
+        self.align.setCurrentIndex(max(0, self.align.findData(side)))
+
+    def _show_align(self, *_):
+        for e in (getattr(self, 'ar', None), getattr(self, 'en', None)):
+            if e is not None:
+                e.apply_direction(self.align.currentData() or '')
 
     def _clear(self):
         while self.body.count():
@@ -646,8 +712,10 @@ class BlockWidget(QFrame):
             self.ar.set_value(self.block.get('ar'))
             self.en.set_value(self.block.get('en'))
             for e in (self.ar, self.en):
+                e.apply_direction(self.align.currentData() or '')
                 e.textChanged.connect(lambda *_: self.changed.emit())
                 e.focused.connect(self.focused.emit)
+                e.align_requested.connect(self._align_to)
                 e.extra_menu = self.fill_menu
             row = QHBoxLayout()
             row.setSpacing(8)
@@ -837,6 +905,11 @@ class BlockWidget(QFrame):
             out['data'] = {'asset_id': self.asset_id, 'width': self.width.value()}
             out['ar'], out['en'] = self.cap_ar.text().strip(), self.cap_en.text().strip()
         return out
+
+
+BLOCK_PAGE = 50     # blocks built at a time: a section imported from a PDF can hold thousands, and every block is a
+                    # whole editing form (about 25 ms and many widgets each) — all at once froze the program and then
+                    # closed it for want of memory
 
 
 def _alive(w):
@@ -1123,14 +1196,25 @@ document.addEventListener('click',function(e){var t=e.target,side=t.closest('.en
 
 
 def _picking_page(parent, on_pick):
-    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript
 
     class Page(QWebEnginePage):
         def javaScriptConsoleMessage(self, level, message, line, source):    # noqa: N802 (Qt name)
             if message.startswith('MBPICK '):
                 on_pick(message[7:])
 
-    return Page(parent)
+    page = Page(parent)
+    # the click script belongs to every page loaded here, from the moment its document is ready: added later (once
+    # the first laid-out page appeared, waiting at most 10 seconds) it never came on a long section, and then a click
+    # on the preview did nothing — no editor block, no settings panel
+    js = QWebEngineScript()
+    js.setName('mb-pick')
+    js.setSourceCode(PICK_JS)
+    js.setInjectionPoint(QWebEngineScript.DocumentReady)
+    js.setWorldId(QWebEngineScript.MainWorld)
+    js.setRunsOnSubFrames(False)
+    page.scripts().insert(js)
+    return page
 
 
 class Preview(QWidget):
@@ -1212,18 +1296,18 @@ class Preview(QWidget):
         m.exec(self.view.mapToGlobal(pos))
 
     def _arm(self, tries=0):
-        """Paged.js lays the pages out after the load; the click script is added once they exist."""
+        """Paged.js lays the pages out after the load: once they exist, the page count is shown and the preview goes
+        back to where it was. (The click script is part of every page: ``_picking_page``.)"""
         if self.view is None:
             return
 
         def ready(n):
             if n:
                 self._page_count(int(n))
-                self.view.page().runJavaScript(PICK_JS)
                 if getattr(self, '_scroll_back', None):
                     self.view.page().runJavaScript(f'window.scrollTo(0,{int(self._scroll_back)})')
-            elif tries < 40:
-                QTimer.singleShot(250, lambda: self._arm(tries + 1))
+            elif tries < 240:                       # a long section takes a while: up to two minutes
+                QTimer.singleShot(500, lambda: self._arm(tries + 1))
         self.view.page().runJavaScript("document.querySelectorAll('.pagedjs_page').length", 0, ready)
 
     def _page_count(self, n):
@@ -1277,7 +1361,7 @@ class Preview(QWidget):
             self.lay.replaceWidget(self.holder, self.view)
             self.holder.hide()
         from ..core.pdf import write_html
-        path = write_html(html, os.path.join(self.ctx.data_dir, 'preview'), 'preview.html')
+        path = os.path.abspath(write_html(html, os.path.join(self.ctx.data_dir, 'preview'), 'preview.html'))
         self._scroll_back = None
         if self.view.url().isValid() and not self.view.url().isEmpty():
             self.view.page().runJavaScript('window.scrollY', 0, lambda y: setattr(self, '_scroll_back', y))
@@ -1345,6 +1429,19 @@ class EditorTab(QWidget):
         self.fmt = FormatBar()
         self.block_list = QVBoxLayout()
         self.block_list.setSpacing(8)
+        self._stored, self._first, self._shown_n = [], 0, 0      # the section's blocks; the open page of them
+        self.page_prev = button(L('الكتل السابقة', 'Previous blocks'), 'up')
+        self.page_prev.clicked.connect(lambda: self._show_block_page(self._first - BLOCK_PAGE))
+        self.page_next = button(L('الكتل التالية', 'Next blocks'), 'down')
+        self.page_next.clicked.connect(lambda: self._show_block_page(self._first + BLOCK_PAGE))
+        self.page_at = QSpinBox()
+        self.page_at.setKeyboardTracking(False)
+        fit(self.page_at, 90)
+        a11y(self.page_at, L('الذهاب إلى الكتلة رقم', 'Go to block number'))
+        self.page_at.valueChanged.connect(lambda v: self._show_block_page(v - 1 - (v - 1) % BLOCK_PAGE))
+        self.page_info = muted('')
+        self.pager = flow_row([self.page_prev, self.page_next, muted(L('الذهاب إلى الكتلة', 'Go to block')), self.page_at,
+                               self.page_info], 6)
         add_block = button(L('إضافة كتلة', 'Add a block'), 'plus')
         add_block.clicked.connect(lambda: self._add_block_menu())
         self.save_btn = button(L('حفظ', 'Save'), 'save', 'primary', tip='Ctrl+S')
@@ -1376,6 +1473,7 @@ class EditorTab(QWidget):
         cl.addWidget(self.form)
         blocks_box = card(L('المحتوى', 'Content'))
         bl = QVBoxLayout(blocks_box)
+        bl.addWidget(self.pager)
         bl.addLayout(self.block_list)
         bl.addWidget(add_block, 0, Qt.AlignLeading)
         self.blocks_box = blocks_box
@@ -1525,6 +1623,8 @@ class EditorTab(QWidget):
         s = self.db.section(sid)
         if not s:
             return
+        if sid != self.sid:
+            self._first = 0
         self.sid = sid
         self.form.load(s)
         self._reload_blocks()
@@ -1539,24 +1639,62 @@ class EditorTab(QWidget):
             self.refresh_preview(force=True)
 
     def _reload_blocks(self):
+        """Builds the open page of the section's blocks (BLOCK_PAGE at a time) from the saved data."""
+        self._stored = [dict(b) for b in self.db.blocks(self.sid)] if self.sid else []
+        self._first = max(0, min(self._first, (max(0, len(self._stored) - 1) // BLOCK_PAGE) * BLOCK_PAGE))
+        page = self._stored[self._first:self._first + BLOCK_PAGE]
         # the blocks are built with the box hidden: added to a shown layout, each one lays the window out again
         box = self.blocks_box
         box.setUpdatesEnabled(False)
         box.hide()
         _clear_layout(self.block_list)
         self.blocks = []
-        for b in self.db.blocks(self.sid):
+        for b in page:
             self._append_block(b)
+        self._shown_n = len(page)
+        self._pager_state()
         size_tree(self.scroll)
         box.show()
         box.setUpdatesEnabled(True)
+
+    def _pager_state(self):
+        n = len(self._stored)
+        self.pager.setVisible(n > BLOCK_PAGE)
+        last = self._first + len(self.blocks)
+        self.page_info.setText(L(f'الكتل {self._first + 1}–{last} من {n}', f'Blocks {self._first + 1}–{last} of {n}'))
+        self.page_prev.setEnabled(self._first > 0)
+        self.page_next.setEnabled(self._first + self._shown_n < n)
+        self.page_at.blockSignals(True)
+        self.page_at.setRange(1, max(1, n))
+        self.page_at.setValue(self._first + 1)
+        self.page_at.blockSignals(False)
+
+    def _show_block_page(self, first):
+        """Opens another page of the section's blocks (what is written on this one is saved first)."""
+        if self.dirty:
+            self.save(quiet=True)
+        self._first = max(0, first)
+        self._reload_blocks()
+        self.scroll.verticalScrollBar().setValue(0)
+        if self.preview.scope.currentData() == 'section':
+            self.refresh_preview(force=True)
+
+    def _all_blocks(self):
+        """Every block of the section: the open page as written now, the others as saved."""
+        return (self._stored[:self._first] + [w.value() for w in self.blocks]
+                + self._stored[self._first + self._shown_n:])
 
     def goto(self, sid, b=None, path=None):
         """Opens a section and brings one of its blocks into view (used by the checker)."""
         if self.dirty:
             self.save(quiet=True)
         self.reload_tree(select=sid)
-        if self.sid != sid or b is None or b >= len(self.blocks):
+        if self.sid != sid or b is None or b >= len(self._stored):
+            return
+        if not self._first <= b < self._first + len(self.blocks):     # ``b`` counts from the start of the section
+            self._show_block_page(b - b % BLOCK_PAGE)
+        b -= self._first
+        if not 0 <= b < len(self.blocks):
             return
         w = self.blocks[b]
         side = (path or ['ar'])[-1] if path and path[-1] in ('ar', 'en') else 'ar'
@@ -1607,7 +1745,7 @@ class EditorTab(QWidget):
             return
         data = self.form.value()
         self.db.save_section(data, self.sid)
-        blocks = [w.value() for w in self.blocks]
+        blocks = self._all_blocks()
         fixed = 0
         prefs = doctor.load_prefs(self.db)
         if prefs.get('auto_save'):                 # the checker's safe text fixes, when the user turned them on
@@ -1617,6 +1755,10 @@ class EditorTab(QWidget):
         self.db.replace_blocks(self.sid, blocks)
         if fixed:
             self._reload_blocks()
+        else:
+            self._stored = [dict(b) for b in blocks]
+            self._shown_n = len(self.blocks)
+            self._pager_state()
         self.dirty = False
         self.saved_label.setText(L(f'حُفظ، وضُبط {fixed} موضعاً', f'Saved; {fixed} place(s) tidied') if fixed else L('حُفظ', 'Saved'))
         it = self.tree.currentItem()
@@ -1666,9 +1808,9 @@ class EditorTab(QWidget):
         parts = what.split()
         try:
             if parts[0] == 'b':
+                # the block clicked in the preview opens here too, also in the section already open
                 sid, i = parts[1].split(':')
-                if int(sid) != self.sid:
-                    self.goto(int(sid), int(i) if i else None, [parts[2]] if len(parts) > 2 else None)
+                self.goto(int(sid), int(i) if i else None, [parts[2]] if len(parts) > 2 else None)
             elif parts[0] == 's' and int(parts[1]) != self.sid:
                 self.goto(int(parts[1]))
         except (IndexError, ValueError):
@@ -1689,8 +1831,10 @@ class EditorTab(QWidget):
         """The panel on the preview changed something: what is open here is drawn again from the saved data."""
         if sid and sid == self.sid:
             self.dirty = False
-            keep, self.sid = self.sid, None
+            keep, first, self.sid = self.sid, self._first, None
             self.reload_tree(select=keep)
+            if first:
+                self._show_block_page(first)
         if not sid and self.ctx.window:
             self.ctx.window.design.load_manual(self.mid, keep_history=True)
         self.refresh_preview(force=True)
@@ -1893,11 +2037,13 @@ class EditorTab(QWidget):
         if self.dirty:
             self.save(quiet=True)
         from ..core.html import build_html
-        only = None
+        only = window = None
         if self.preview.scope.currentData() == 'section' and self.sid:
             only = [self.sid]
+            if len(self._stored) > BLOCK_PAGE:          # a long section: the pages of the blocks open here
+                window = {self.sid: (self._first, self._first + self._shown_n)}
         try:
-            html = build_html(self.db, self.mid, 'print', only=only, workflow=self.ctx.workflow, draft=True)
+            html = build_html(self.db, self.mid, 'print', only=only, workflow=self.ctx.workflow, draft=True, window=window)
         except Exception as e:  # noqa: BLE001 — a preview must never take the editor down
             self.preview.state.setText(str(e)[:120])
             return
