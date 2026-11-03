@@ -57,7 +57,9 @@ jobs:
           if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.v.outputs.version }}" installer\ManualBuilder.iss
       - uses: actions/upload-artifact@v4
-        with: { name: ManualBuilderSetup, path: dist/ManualBuilderSetup.exe }
+        # one day only: the installer to download is the one in the «latest» release; copies kept with every
+        # build (about 140 MB each) only piled up
+        with: { name: ManualBuilderSetup, path: dist/ManualBuilderSetup.exe, retention-days: 1 }
       - name: Publish to the fixed download link
         if: github.ref == 'refs/heads/main'
         shell: bash
