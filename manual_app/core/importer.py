@@ -793,6 +793,20 @@ def _on_white(img):
     return out
 
 
+def is_plain_page(img):
+    """A page with no design: nearly every point pure white. A pale background (cream, light grey, a faint
+    watermark) is a design and is kept, so the test is against pure white, not against "light"."""
+    small = img.scaled(120, 160)
+    total = small.width() * small.height()
+    white = 0
+    for x in range(small.width()):
+        for y in range(small.height()):
+            c = small.pixelColor(x, y)
+            if c.red() >= 253 and c.green() >= 253 and c.blue() >= 253:
+                white += 1
+    return white > total * 0.995
+
+
 def pdf_page_design(path, page_no, dpi=110):
     """The design of a PDF page (frames, coloured bands, logos, pictures) without its text: the page is drawn, and
     every line of text is painted over with the colour around it. Returns (PNG bytes, width, height), or None when the
@@ -829,9 +843,7 @@ def pdf_page_design(path, page_no, dpi=110):
         samples.sort(key=lambda c: c.lightness())
         p.fillRect(r, samples[len(samples) // 2])
     p.end()
-    small = img.scaled(60, 80)
-    white = sum(1 for x in range(small.width()) for y in range(small.height()) if small.pixelColor(x, y).lightness() > 245)
-    if white > small.width() * small.height() * 0.985:
+    if is_plain_page(img):
         return None                                  # a plain white page: no design to keep
     buf = QBuffer()
     buf.open(QIODevice.WriteOnly)

@@ -227,7 +227,12 @@ def keep_pdf_look(db, mid, path):
         return ()
     QGuiApplication.setOverrideCursor(Qt.WaitCursor)
     try:
-        design = importer.pdf_page_design(path, 2)
+        # the first page after the cover that has a design (a plain page between them does not hide it)
+        design = None
+        for page in range(2, min(n, 6) + 1):
+            design = importer.pdf_page_design(path, page)
+            if design:
+                break
     finally:
         QGuiApplication.restoreOverrideCursor()
     if design:
