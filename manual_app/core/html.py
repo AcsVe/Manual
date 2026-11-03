@@ -136,6 +136,10 @@ def mirror_tables(body):
     return _TABLE.sub(flip, body)
 
 
+FONT_RANGES = (('arabic', 'U+0600-06FF,U+0750-077F,U+0870-08FF,U+FB50-FDFF,U+FE70-FEFF,U+200C-200F'),
+               ('latin', 'U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+2000-206F,U+20AC,U+2122,U+2190-2193,U+2212'))
+
+
 def app_root():
     return getattr(sys, '_MEIPASS', os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -321,8 +325,7 @@ class Renderer:
             if not slug:
                 continue
             for weight in (400, 700):
-                for sub, rng in (('arabic', 'U+0600-06FF,U+0750-077F,U+0870-08FF,U+FB50-FDFF,U+FE70-FEFF,U+200C-200F'),
-                                 ('latin', 'U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+2000-206F,U+20AC,U+2122,U+2190-2193,U+2212')):
+                for sub, rng in FONT_RANGES:
                     path = os.path.join(folder, f'{slug}-{sub}-{weight}-normal.woff2')
                     if not os.path.isfile(path):
                         continue
@@ -931,13 +934,18 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         """An SVG used as an image cannot load fonts from outside: the chart's fonts go inside it."""
         folder = os.path.join(assets_dir(), 'fonts')
         fam = self.lay['fonts']['ar']
-        slug = FONTS.get(fam, 'tajawal')
+        if fam not in FONTS:
+            return svg              # a font installed in Windows: the drawing takes it from the system by its name
+        slug = FONTS[fam]
         faces = []
         for weight in (400, 700):
-            for sub in ('arabic', 'latin'):
+            for sub, rng in FONT_RANGES:
                 path = os.path.join(folder, f'{slug}-{sub}-{weight}-normal.woff2')
                 if os.path.isfile(path):
-                    faces.append(f'@font-face{{font-family:"{fam}";font-weight:{weight};src:url({_b64(open(path, "rb").read(), "font/woff2")})}}')
+                    # each subset with its own letters: without the range the last file declared would be used for
+                    # every letter, and the Arabic names would be drawn in another font than the one they were measured in
+                    faces.append(f'@font-face{{font-family:"{fam}";font-weight:{weight};'
+                                 f'src:url({_b64(open(path, "rb").read(), "font/woff2")});unicode-range:{rng}}}')
         if not faces:
             return svg
         i = svg.index('>') + 1

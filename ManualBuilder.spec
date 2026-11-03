@@ -17,7 +17,8 @@ datas = [('assets', 'assets')] + [(_os.path.join(_tr, f), 'PySide6/Qt/translatio
                                   if _os.path.isfile(_os.path.join(_tr, f))] + collect_data_files('docx') + collect_data_files('pdfminer')
 a = Analysis(['run.py'], pathex=[], binaries=[], datas=datas,
              hiddenimports=['pypdf', 'numpy', 'cryptography', 'PySide6.QtNetwork', 'PySide6.QtSvg', 'PySide6.QtSvgWidgets', 'PySide6.QtPdf', 'PySide6.QtWebEngineCore',
-                            'PySide6.QtWebEngineWidgets', 'PySide6.QtPrintSupport', 'pdfminer', 'docx', 'lxml.html'],
+                            'PySide6.QtWebEngineWidgets', 'PySide6.QtPrintSupport', 'pdfminer', 'docx', 'lxml.html',
+                            'fontTools.ttLib.woff2', 'brotli', 'uharfbuzz'],
              hookspath=[], runtime_hooks=[], excludes=EXCLUDE, cipher=block_cipher, noarchive=False)
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='ManualBuilder', debug=False, strip=False, upx=False,

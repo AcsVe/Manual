@@ -605,7 +605,7 @@ class BlockWidget(QFrame):
         for k, (ar, en) in BLOCK_ALIGN.items():
             self.align.addItem(L(ar, en), k)
         self.align.setCurrentIndex(max(0, self.align.findData((block.get('style') or {}).get('align', ''))))
-        self.align.currentIndexChanged.connect(self.changed.emit)
+        self.align.currentIndexChanged.connect(lambda *_: self.changed.emit())
         fit(self.align, 150)
         a11y(self.align, L('محاذاة النص', 'Text alignment'))
         add = icon_button('plus', L('إضافة كتلة بعد هذه الكتلة', 'Add a block after this one'))
@@ -646,7 +646,7 @@ class BlockWidget(QFrame):
             self.ar.set_value(self.block.get('ar'))
             self.en.set_value(self.block.get('en'))
             for e in (self.ar, self.en):
-                e.textChanged.connect(self.changed.emit)
+                e.textChanged.connect(lambda *_: self.changed.emit())
                 e.focused.connect(self.focused.emit)
                 e.extra_menu = self.fill_menu
             row = QHBoxLayout()
@@ -661,12 +661,12 @@ class BlockWidget(QFrame):
             self.body.addLayout(row)
         elif k == 'table':
             self.table = TableEditor(dict(d) if d.get('columns') else table_data('custom'))
-            self.table.changed.connect(self.changed.emit)
+            self.table.changed.connect(lambda *_: self.changed.emit())
             self.table.colors_for_all.connect(self.table_colors.emit)
             self.body.addWidget(self.table)
         elif k == 'links':
             self.links = LinksEditor(d.get('items') or [])
-            self.links.changed.connect(self.changed.emit)
+            self.links.changed.connect(lambda *_: self.changed.emit())
             self.body.addWidget(self.links)
         elif k == 'image':
             st = self.block.get('style') or {}
@@ -687,7 +687,7 @@ class BlockWidget(QFrame):
             self.width.setRange(10, 100)
             self.width.setSuffix(' %')
             self.width.setValue(int(d.get('width') or 100))
-            self.width.valueChanged.connect(self.changed.emit)
+            self.width.valueChanged.connect(lambda *_: self.changed.emit())
             fit(self.width, 110)
             self.fullpage = QCheckBox(L('صفحة كاملة (تملأ الورقة دون هوامش، وتأخذ اتجاه الصورة)',
                                         'A whole page (fills the sheet without margins, turned as the image)'))
@@ -699,7 +699,7 @@ class BlockWidget(QFrame):
             self.cap_en = ltr(QLineEdit(self.block.get('en') or ''))
             self.cap_en.setPlaceholderText(L('التعليق بالإنجليزية (اختياري)', 'English caption (optional)'))
             for e in (self.cap_ar, self.cap_en):
-                e.textChanged.connect(self.changed.emit)
+                e.textChanged.connect(lambda *_: self.changed.emit())
             g = form_grid()
             field(g, 0, 0, L('العرض من عرض الصفحة', 'Width of the page width'), self.width)
             g.addWidget(self.fullpage, 1, 0, 1, 2)
@@ -715,13 +715,13 @@ class BlockWidget(QFrame):
             for key, (ar, en) in HEADS.items():
                 self.head.addItem(L(ar, en), key)
             self.head.setCurrentIndex(max(0, self.head.findData((self.block.get('style') or {}).get('head', ''))))
-            self.head.currentIndexChanged.connect(self.changed.emit)
+            self.head.currentIndexChanged.connect(lambda *_: self.changed.emit())
             fit(self.head, 200)
             self.orient = QComboBox()
             for key, (ar, en) in ORIENTS.items():
                 self.orient.addItem(L(ar, en), key)
             self.orient.setCurrentIndex(max(0, self.orient.findData((self.block.get('style') or {}).get('orient', ''))))
-            self.orient.currentIndexChanged.connect(self.changed.emit)
+            self.orient.currentIndexChanged.connect(lambda *_: self.changed.emit())
             fit(self.orient, 160)
             g = form_grid()
             field(g, 0, 0, L('اتجاه الصفحات بعده', 'Direction of the pages after it'), self.orient)
@@ -837,6 +837,12 @@ class BlockWidget(QFrame):
             out['data'] = {'asset_id': self.asset_id, 'width': self.width.value()}
             out['ar'], out['en'] = self.cap_ar.text().strip(), self.cap_en.text().strip()
         return out
+
+
+def _alive(w):
+    """False once Qt has deleted the widget (a delayed step must not touch it then)."""
+    from shiboken6 import isValid
+    return w is not None and isValid(w)
 
 
 def _block_icon(k):
@@ -968,14 +974,14 @@ class SectionForm(QWidget):
         for b in (self.policy_box, self.org_box, self.ctrl_box, self.toc_box, self.table_box):
             lay.addWidget(b)
         for w in (self.title_ar, self.title_en, self.code, self.resp_ar, self.resp_en, self.effective):
-            w.textChanged.connect(self.changed.emit)
+            w.textChanged.connect(lambda *_: self.changed.emit())
         for w in (self.new_page, self.in_toc):
-            w.toggled.connect(self.changed.emit)
+            w.toggled.connect(lambda *_: self.changed.emit())
         for w in (self.kind, self.orientation, self.org_root, self.ctrl_policy):
-            w.currentIndexChanged.connect(self.changed.emit)
+            w.currentIndexChanged.connect(lambda *_: self.changed.emit())
         for w in (self.org_depth, self.toc_depth):
-            w.valueChanged.connect(self.changed.emit)
-        self.next_review.dateChanged.connect(self.changed.emit)
+            w.valueChanged.connect(lambda *_: self.changed.emit())
+        self.next_review.dateChanged.connect(lambda *_: self.changed.emit())
         self.kind.currentIndexChanged.connect(self._kind_boxes)
 
     def load(self, s):
@@ -1027,7 +1033,7 @@ class SectionForm(QWidget):
             self.table = None
         if s['kind'] == 'table':
             self.table = TableEditor(dict(d) if d.get('columns') else table_data('custom'))
-            self.table.changed.connect(self.changed.emit)
+            self.table.changed.connect(lambda *_: self.changed.emit())
             self.table.colors_for_all.connect(self.table_colors.emit)
             self.table_lay.addWidget(self.table)
         self._kind_boxes()
@@ -1517,14 +1523,22 @@ class EditorTab(QWidget):
         side = (path or ['ar'])[-1] if path and path[-1] in ('ar', 'en') else 'ar'
         target = getattr(w, side, None)
 
+        def flash(on):
+            if _alive(w):
+                w.setProperty('flash', on)
+                w.style().unpolish(w)
+                w.style().polish(w)
+
         def show():
+            if not _alive(w):                  # the blocks were drawn again meanwhile
+                return
             self.scroll.ensureWidgetVisible(w, 40, 80)
             w.setProperty('flash', True)
             w.style().unpolish(w)
             w.style().polish(w)
             if target is not None and hasattr(target, 'setFocus'):
                 target.setFocus()
-            QTimer.singleShot(2500, lambda: (w.setProperty('flash', False), w.style().unpolish(w), w.style().polish(w)))
+            QTimer.singleShot(2500, lambda: flash(False))
         QTimer.singleShot(60, show)
 
     def _append_block(self, b, at=None):
@@ -1585,7 +1599,7 @@ class EditorTab(QWidget):
         b = {'kind': kind, 'ar': '', 'en': '', 'data': table_data('custom') if kind == 'table' else {}}
         w = self._append_block(b, at)
         self._touch()
-        QTimer.singleShot(50, lambda: self.scroll.ensureWidgetVisible(w))
+        QTimer.singleShot(50, lambda: _alive(w) and self.scroll.ensureWidgetVisible(w))
 
     def _remove_block(self, w):
         v = w.value()

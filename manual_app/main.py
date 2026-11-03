@@ -85,11 +85,10 @@ class AppContext:
         return self._license
 
     def license_blocked(self, parent):
-        from .ui.common import L
+        from .ui.common import L, error
         from .ui.main_window import LicenseDialog
         st = self.license(refresh=True)
-        QMessageBox.warning(parent, L('الترخيص', 'Licence'),
-                            st.describe(L) + '\n\n' + L('أدخل مفتاح الترخيص لهذا الجهاز لمتابعة التصدير. البيانات محفوظة ويمكن تعديلها وعرضها.',
+        error(parent, st.describe(L) + '\n\n' + L('أدخل مفتاح الترخيص لهذا الجهاز لمتابعة التصدير. البيانات محفوظة ويمكن تعديلها وعرضها.',
                                                         'Enter the licence key for this computer to continue exporting. Your data is kept and can be edited and viewed.'))
         LicenseDialog(parent, self).exec()
 

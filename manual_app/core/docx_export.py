@@ -16,7 +16,7 @@ from . import orgchart
 from .db import CONTROL_STATUSES
 from .html import DEFAULT_DISCLAIMER, LABELS
 from .richtext import lines, runs
-from .templates import PAGE_SIZES, layout_with_defaults
+from .templates import FONTS, PAGE_SIZES, layout_with_defaults
 
 
 def _rgb(hexcol):
@@ -90,8 +90,11 @@ class DocxExporter:
         self.m = db.manual(manual_id)
         self.lay = layout_with_defaults(self.m['layout'])
         self.lm = self.lay['lang_mode']
-        self.font_ar = self.lay['fonts']['ar'] if self.lay['fonts']['ar'] in ('Amiri', 'Cairo', 'Tajawal') else 'Arial'
-        self.font_en = 'Calibri'
+        f = self.lay['fonts']
+        # a font installed in Windows is written by its name (Word takes it from the system); the program's own
+        # fonts keep their earlier stand-ins
+        self.font_ar = f['ar'] if f['ar'] not in FONTS or f['ar'] in ('Amiri', 'Cairo', 'Tajawal') else 'Arial'
+        self.font_en = f['en'] if f['en'] not in FONTS else 'Calibri'
         self.c = self.lay['colors']
         self.doc = Document()
 

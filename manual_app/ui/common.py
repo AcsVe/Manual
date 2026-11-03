@@ -31,22 +31,57 @@ def norm(v):
 
 
 def _message(parent, title, text, icon, choices):
-    """A message with the program's own buttons: their names written out (not Qt's translations) and the
-    program's control height, so an Arabic word is never cut at the bottom of its button."""
-    from .theme import size_tree
-    box = QMessageBox(icon, title, text, QMessageBox.NoButton, parent)
+    """A message window of the program's own (not QMessageBox): the text wraps inside a measured width, and every
+    button is as wide and as tall as its words need in the font Windows really uses, so «نعم» and «لا» are never cut
+    at any display scaling. ``icon``: a QMessageBox icon value. Returns the index of the chosen button (the last one
+    when the window is closed)."""
+    from PySide6.QtWidgets import QDialog, QStyle
+    from .theme import button, control_height
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.setLayoutDirection(Qt.LeftToRight if lang() == 'en' else Qt.RightToLeft)
+    dlg.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+    pix = {QMessageBox.Information: QStyle.SP_MessageBoxInformation, QMessageBox.Warning: QStyle.SP_MessageBoxWarning,
+           QMessageBox.Critical: QStyle.SP_MessageBoxCritical, QMessageBox.Question: QStyle.SP_MessageBoxQuestion}.get(icon)
+    body = QHBoxLayout()
+    body.setSpacing(16)
+    if pix is not None:
+        ic = QLabel()
+        ic.setPixmap(dlg.style().standardIcon(pix).pixmap(40, 40))
+        ic.setAlignment(Qt.AlignTop)
+        body.addWidget(ic, 0, Qt.AlignTop)
+    lab = QLabel(text)
+    lab.setWordWrap(True)
+    lab.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    lab.setAlignment(Qt.AlignTop | (Qt.AlignLeft if lang() == 'en' else Qt.AlignRight))
+    fm = lab.fontMetrics()
+    widest = max((fm.horizontalAdvance(x) for x in str(text).splitlines() or ['']), default=0)
+    lab.setMinimumWidth(min(max(300, widest + 8), 560))
+    lab.setStyleSheet('font-size: 10.5pt; line-height: 150%;')
+    body.addWidget(lab, 1)
+    row = QHBoxLayout()
+    row.addStretch(1)
     made = []
-    for label, role in choices:
-        b = box.addButton(label, role)
-        b.setAccessibleName(label)
-        b.setCursor(Qt.PointingHandCursor)
-        b.setMinimumWidth(90)
+    h = control_height(dlg)
+    for i, (label, role) in enumerate(choices):
+        kind = 'primary' if i == 0 and len(choices) > 1 else 'secondary'
+        b = button(label, kind=kind)
+        b.setMinimumWidth(max(96, b.fontMetrics().horizontalAdvance(label) + 48))
+        b.setMinimumHeight(h)
+        b.setProperty('_sized', True)
+        b.clicked.connect(lambda _=False, k=i: dlg.done(k + 1))
+        row.addWidget(b)
         made.append(b)
-    box.setDefaultButton(made[-1])
-    box.setEscapeButton(made[-1])
-    size_tree(box)
-    box.exec()
-    return made.index(box.clickedButton()) if box.clickedButton() in made else len(made) - 1
+    lay = QVBoxLayout(dlg)
+    lay.setContentsMargins(22, 20, 22, 16)
+    lay.setSpacing(18)
+    lay.addLayout(body)
+    lay.addLayout(row)
+    made[-1].setDefault(True)
+    made[-1].setFocus()
+    dlg.adjustSize()
+    r = dlg.exec()
+    return r - 1 if 1 <= r <= len(made) else len(made) - 1
 
 
 def info(parent, text):

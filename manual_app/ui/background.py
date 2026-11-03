@@ -143,7 +143,7 @@ class PositionGrid(QWidget):
                 self.group.addButton(b)
                 g.addWidget(b, r, c)        # physical places: the grid is not mirrored
                 self.buttons[k] = b
-                b.clicked.connect(self.changed.emit)
+                b.clicked.connect(lambda *_: self.changed.emit())
         self.setLayoutDirection(Qt.LeftToRight)
         self.setFixedSize(3 * 30 + 2 * 3, 3 * 24 + 2 * 3)
 

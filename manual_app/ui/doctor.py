@@ -549,19 +549,16 @@ def check_before_export(parent, ctx, mid):
     if not issues:
         return True
     from PySide6.QtWidgets import QMessageBox
+    from .common import _message
     errors = sum(1 for x in issues if x['sev'] == 'error')
-    box = QMessageBox(parent)
-    box.setIcon(QMessageBox.Warning)
-    box.setWindowTitle(L('مدقق الدليل', 'Manual checker'))
-    box.setText(L(f'وجد المدقق {errors} خطأ و{len(issues) - errors} تحذيراً قد تظهر في الملف.',
-                  f'The checker found {errors} error(s) and {len(issues) - errors} warning(s) that may show in the file.'))
-    show = box.addButton(L('عرضها', 'Show them'), QMessageBox.AcceptRole)
-    go = box.addButton(L('التصدير على أي حال', 'Export anyway'), QMessageBox.DestructiveRole)
-    box.addButton(L('إلغاء', 'Cancel'), QMessageBox.RejectRole)
-    box.exec()
-    if box.clickedButton() is go:
+    pick = _message(parent, L('مدقق الدليل', 'Manual checker'),
+                    L(f'وجد المدقق {errors} خطأ و{len(issues) - errors} تحذيراً قد تظهر في الملف.',
+                      f'The checker found {errors} error(s) and {len(issues) - errors} warning(s) that may show in the file.'),
+                    QMessageBox.Warning, [(L('عرضها', 'Show them'), None), (L('التصدير على أي حال', 'Export anyway'), None),
+                                          (L('إلغاء', 'Cancel'), None)])
+    if pick == 1:
         return True
-    if box.clickedButton() is show and ctx.window:
+    if pick == 0 and ctx.window:
         ctx.window.open_doctor(run=True)
     return False
 

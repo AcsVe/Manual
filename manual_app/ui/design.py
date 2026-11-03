@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QCheckBox, QColorDialog, QCombo
 
 from ..core import backgrounds as BG
 from ..core.html import DEFAULT_DISCLAIMER
-from ..core.templates import (ALIGNMENTS, DEFAULT_LAYOUT, FONTS, FRONT_NUMBERING, HEADER_STYLES, LANG_MODES, PAGE_DIGITS,
+from ..core.templates import (ALIGNMENTS, DEFAULT_LAYOUT, FRONT_NUMBERING, HEADER_STYLES, LANG_MODES, PAGE_DIGITS,
                               PAGE_NUMBER_FORMATS, PAGE_SIZES, TOKENS,
                               layout_with_defaults)
 from .background import edit_background
@@ -105,11 +105,12 @@ class DesignTab(QWidget):
         self.lang = QComboBox()
         for k, (ar, en) in LANG_MODES.items():
             self.lang.addItem(L(ar, en), k)
-        self.font_ar = QComboBox()
-        self.font_en = QComboBox()
-        for f in FONTS:
-            self.font_ar.addItem(f, f)
-            self.font_en.addItem(f, f)
+        from .fonts import FontPicker
+        self.font_ar = FontPicker(arabic=True)
+        self.font_en = FontPicker()
+        self.font_note = hint('')
+        for w in (self.font_ar, self.font_en):
+            w.currentIndexChanged.connect(self._font_note)
         self.font_size = QDoubleSpinBox()
         self.font_size.setRange(7, 16)
         self.font_size.setSingleStep(0.5)
@@ -120,7 +121,7 @@ class DesignTab(QWidget):
         self.align = QComboBox()
         for k, (ar, en) in ALIGNMENTS.items():
             self.align.addItem(L(ar, en), k)
-        for w, n in ((self.size, 120), (self.orient, 140), (self.lang, 320), (self.align, 330), (self.font_ar, 200), (self.font_en, 200),
+        for w, n in ((self.size, 120), (self.orient, 140), (self.lang, 320), (self.align, 330), (self.font_ar, 260), (self.font_en, 260),
                      (self.font_size, 110), (self.line, 100)):
             fit(w, n)
         pg = form_grid()
@@ -136,9 +137,10 @@ class DesignTab(QWidget):
         field(pg, 2, 0, L('لغة الدليل', 'Manual language'), self.lang, 3)
         field(pg, 3, 0, L('الخط العربي', 'Arabic font'), self.font_ar)
         field(pg, 3, 2, L('الخط الإنجليزي', 'English font'), self.font_en)
-        field(pg, 4, 0, L('حجم الخط', 'Font size'), self.font_size)
-        field(pg, 4, 2, L('تباعد الأسطر', 'Line spacing'), self.line)
-        field(pg, 9, 0, L('محاذاة النصوص', 'Text alignment'), self.align, 3,
+        pg.addWidget(self.font_note, 4, 1, 1, 3)
+        field(pg, 5, 0, L('حجم الخط', 'Font size'), self.font_size)
+        field(pg, 5, 2, L('تباعد الأسطر', 'Line spacing'), self.line)
+        field(pg, 10, 0, L('محاذاة النصوص', 'Text alignment'), self.align, 3,
               desc=L('محاذاة كل الفقرات؛ ويمكن تغيير محاذاة فقرة بعينها من المحرر', 'Alignment of every paragraph; one paragraph can be changed in the editor'))
         self.boxes = QCheckBox(L('إطار حول كل قسم', 'A frame around every section'))
         self.numbering = QCheckBox(L('ترقيم العناوين (1، 1.1، 1.1.1)', 'Number the headings (1, 1.1, 1.1.1)'))
@@ -149,12 +151,12 @@ class DesignTab(QWidget):
         fit(self.toc_depth, 90)
         self.watermark = QLineEdit()
         self.watermark.setPlaceholderText(L('مثلاً: سري', 'e.g. Confidential'))
-        pg.addWidget(self.boxes, 5, 1)
-        pg.addWidget(self.numbering, 5, 3)
-        pg.addWidget(self.policy_footer, 6, 1, 1, 3)
-        pg.addWidget(self.draft_mark, 7, 1, 1, 3)
-        field(pg, 8, 0, L('مستويات الفهرس', 'Contents levels'), self.toc_depth)
-        field(pg, 8, 2, L('علامة مائية', 'Watermark'), self.watermark)
+        pg.addWidget(self.boxes, 6, 1)
+        pg.addWidget(self.numbering, 6, 3)
+        pg.addWidget(self.policy_footer, 7, 1, 1, 3)
+        pg.addWidget(self.draft_mark, 8, 1, 1, 3)
+        field(pg, 9, 0, L('مستويات الفهرس', 'Contents levels'), self.toc_depth)
+        field(pg, 9, 2, L('علامة مائية', 'Watermark'), self.watermark)
         pg.setColumnStretch(1, 1)
         pg.setColumnStretch(3, 1)
         page = card(L('الصفحة والخطوط', 'Page & fonts'))
@@ -434,8 +436,8 @@ class DesignTab(QWidget):
         for k, sp in self.margins.items():
             sp.setValue(int(lay['margins'].get(k, 15)))
         self.lang.setCurrentIndex(max(0, self.lang.findData(lay['lang_mode'])))
-        self.font_ar.setCurrentIndex(max(0, self.font_ar.findData(lay['fonts']['ar'])))
-        self.font_en.setCurrentIndex(max(0, self.font_en.findData(lay['fonts']['en'])))
+        self.font_ar.set_value(lay['fonts']['ar'])
+        self.font_en.set_value(lay['fonts']['en'])
         self.font_size.setValue(float(lay['fonts']['size']))
         self.line.setValue(float(lay['fonts']['line']))
         self.boxes.setChecked(bool(lay.get('boxes')))
@@ -463,6 +465,23 @@ class DesignTab(QWidget):
         self.pn_format.setCurrentIndex(0)
         self.color_values = dict(lay['colors'])
         self._paint_colors()
+
+    def _font_note(self, *_):
+        """Says where a font installed in Windows shows exactly as chosen, and where another font stands in for it."""
+        if not hasattr(self, 'font_en'):
+            return
+        sysf = [w.value() for w in (self.font_ar, self.font_en) if w.is_system()]
+        if not sysf:
+            self.font_note.setText(L('خطوط البرنامج تظهر كما هي في PDF وفي النسخة التفاعلية على أي جهاز.',
+                                     "The program's fonts show as they are in the PDF and in the interactive copy on any computer."))
+            return
+        names = '، '.join(dict.fromkeys(sysf)) if L('ar', 'en') == 'ar' else ', '.join(dict.fromkeys(sysf))
+        self.font_note.setText(L(f'الخط المثبت ({names}) يُضمَّن في ملف PDF فيظهر كما هو عند الجميع. أما ملف Word والنسخة '
+                                 'التفاعلية فيظهر فيهما على الأجهزة المثبَّت عليها هذا الخط فقط، وفي غيرها يحل محله خط '
+                                 'Tajawal.',
+                                 f'The installed font ({names}) is placed inside the PDF, so it shows the same for everyone. The '
+                                 'Word file and the interactive copy show it only on computers where this font is installed; '
+                                 'elsewhere Tajawal stands in for it.'))
 
     def _number_format(self, i):
         key = self.pn_format.itemData(i)
@@ -543,7 +562,7 @@ class DesignTab(QWidget):
         lay.update({
             'page_size': self.size.currentData(), 'orientation': self.orient.currentData(),
             'margins': {k: sp.value() for k, sp in self.margins.items()}, 'lang_mode': self.lang.currentData(),
-            'fonts': {'ar': self.font_ar.currentData(), 'en': self.font_en.currentData(), 'size': self.font_size.value(),
+            'fonts': {'ar': self.font_ar.value(), 'en': self.font_en.value(), 'size': self.font_size.value(),
                       'line': round(self.line.value(), 2)},
             'colors': self.color_values, 'boxes': self.boxes.isChecked(), 'numbering': self.numbering.isChecked(),
             'policy_footer': self.policy_footer.isChecked(), 'draft_mark': self.draft_mark.isChecked(),

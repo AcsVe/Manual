@@ -5,26 +5,80 @@ Upper levels spread side by side; a unit whose members have nobody under them li
 mirrored so it reads from the right."""
 from html import escape
 
-BW, BH = 170, 46           # box width / minimum height
+BW, BH = 170, 46           # box width (widened per chart to fit its names) / minimum height
+BASE_BW = BW
 HGAP, VGAP, INDENT = 18, 34, 18
 PALETTE = ['#0B3D91', '#1F6FD1', '#F28C28', '#3A8DDE', '#5B9BD5', '#7FB2E5']
 
 
-def _wrap(text, size, width):
-    """Splits text into lines that fit ``width`` px at font ``size`` (an estimate good for Arabic and Latin)."""
+PAD = 26                   # inner margin of a box, left and right together
+MAX_BW = 280               # a box grows up to this width before its text takes more lines
+MAX_LINES = 4
+_font = {'family': 'Tajawal'}
+
+
+def _text_width(text, size, bold):
+    """The real width of the text in the chart's font (core/textmeasure), else a generous estimate."""
+    from .textmeasure import width
+    w = width(text, size, bold, _font['family'])
+    return w if w is not None else len(text) * size * (0.62 if bold else 0.58)
+
+
+def _wrap(text, size, width, bold=False):
+    """Splits text into lines that fit ``width`` px at font ``size``, measured with the font the chart uses."""
     if not text:
         return []
-    per = max(6, int(width / (size * 0.55)))
     words, lines, cur = text.split(), [], ''
     for w in words:
-        if cur and len(cur) + 1 + len(w) > per:
+        trial = (cur + ' ' + w).strip()
+        if cur and _text_width(trial, size, bold) > width:
             lines.append(cur)
             cur = w
         else:
-            cur = (cur + ' ' + w).strip()
+            cur = trial
     if cur:
         lines.append(cur)
-    return lines[:4]
+    return lines
+
+
+def _fits(unit, mode, bw):
+    """True when every name of the unit fits a box ``bw`` wide: no word wider than the box, at most MAX_LINES."""
+    inner = bw - PAD
+    for text, size, bold in _texts(unit, mode):
+        lines = _wrap(text, size, inner, bold)
+        if len(lines) > MAX_LINES or any(_text_width(x, size, bold) > inner for x in lines):
+            return False
+    return True
+
+
+def _texts(unit, mode):
+    name_ar, name_en = unit.get('name_ar') or '', unit.get('name_en') or ''
+    out = []
+    if mode in ('ar', 'bi_side', 'bi_stack') and name_ar:
+        out.append((name_ar, 12, True))
+    if mode in ('en', 'bi_side', 'bi_stack') and name_en:
+        out.append((name_en, 10, mode == 'en'))
+    if unit.get('holder'):
+        out.append((unit['holder'], 9.5, False))
+    return out
+
+
+def _box_width(roots, mode, max_depth):
+    """One width for every box of the chart: the narrowest from BW up that fits all of its names."""
+    units = []
+
+    def walk(u, depth):
+        units.append(u)
+        if not max_depth or depth < max_depth:
+            for c in u.get('children', []):
+                if c.get('is_active', 1):
+                    walk(c, depth + 1)
+    for r in roots:
+        walk(r, 0)
+    bw = BASE_BW
+    while bw < MAX_BW and not all(_fits(u, mode, bw) for u in units):
+        bw += 10
+    return bw
 
 
 class _Node:
@@ -32,13 +86,13 @@ class _Node:
         self.u, self.depth = unit, depth
         name_ar, name_en = unit.get('name_ar') or '', unit.get('name_en') or ''
         self.lines = []                                  # (text, size, bold, direction)
-        if mode in ('ar', 'bi_side', 'bi_stack'):
-            self.lines += [(t, 12, True, 'rtl') for t in _wrap(name_ar, 12, BW - 14)]
+        if mode in ('ar', 'bi_side', 'bi_stack') and name_ar:
+            self.lines += [(t, 12, True, 'rtl') for t in _wrap(name_ar, 12, BW - PAD, True)]
         if mode in ('en', 'bi_side', 'bi_stack') and name_en:
-            self.lines += [(t, 10, mode == 'en', 'ltr') for t in _wrap(name_en, 10, BW - 14)]
+            self.lines += [(t, 10, mode == 'en', 'ltr') for t in _wrap(name_en, 10, BW - PAD, mode == 'en')]
         if unit.get('holder'):
-            self.lines += [(t, 9.5, False, 'auto') for t in _wrap(unit['holder'], 9.5, BW - 14)]
-        self.h = max(BH, 12 + sum(int(s * 1.35) for _, s, _, _ in self.lines))
+            self.lines += [(t, 9.5, False, 'auto') for t in _wrap(unit['holder'], 9.5, BW - PAD)]
+        self.h = max(BH, 18 + sum(int(s * 1.35) for _, s, _, _ in self.lines))
         self.children = []
         self.vertical = False
         self.w = self.th = 0
@@ -103,9 +157,12 @@ def render_svg(roots, mode='bi_side', colors=None, font='Tajawal', max_depth=0, 
     """roots: units with 'children' (db.org_tree). Returns an SVG string (empty string when there is nothing)."""
     colors = colors or {}
     palette = [colors.get('primary', PALETTE[0]), colors.get('secondary', PALETTE[1]), colors.get('accent', PALETTE[2])] + PALETTE[3:]
-    nodes = [_build(r, mode, 0, max_depth) for r in roots]
-    if not nodes:
+    global BW
+    if not roots:
         return ''
+    _font['family'] = font
+    BW = _box_width(roots, mode, max_depth)
+    nodes = [_build(r, mode, 0, max_depth) for r in roots]
     for n in nodes:
         _measure(n)
     boxes, lines = [], []
