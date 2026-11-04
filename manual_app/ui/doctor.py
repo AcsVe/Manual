@@ -470,8 +470,25 @@ class DoctorTab(QWidget):
 
     # ── actions ──────────────────────────────────────────────────────
     def fix_ids(self, ids):
+        from .common import confirm, info
         items = self.all_issues()
         chosen = [items[i] for i in ids if i < len(items)]
+        if not chosen:
+            info(self, L('حدّد ملاحظة أو أكثر في القائمة أولاً.', 'Select one or more points in the list first.'))
+            return
+        can = [x for x in chosen if x['fix'] and not x['locked']]
+        if not can:
+            # nothing chosen has an automatic fix (unbalanced brackets, an empty side…): say so plainly, and offer
+            # the place to correct it by hand, instead of «0 fixed» in the small status line
+            names = sorted({L(*RULES[x['rule']][4]) for x in chosen})
+            locked = any(x['locked'] for x in chosen)
+            text = (L('لا يوجد إصلاح آلي لما حددته؛ يُصحَّح باليد:', 'What you selected has no automatic fix; it is corrected by hand:')
+                    + '\n• ' + '\n• '.join(names))
+            if locked:
+                text += '\n\n' + L('بعضها في أقسام معتمدة: أعدها إلى مسودة أولاً.', 'Some are in approved sections: return them to draft first.')
+            if confirm(self, text + '\n\n' + L('فتح أول ملاحظة منها في المحرر؟', 'Open the first of them in the editor?')):
+                self.goto(items.index(chosen[0]))
+            return
         self._fix(chosen)
 
     def fix_all_safe(self):
@@ -508,6 +525,16 @@ class DoctorTab(QWidget):
         if fixed_layout:
             text += L(' أعد الفحص مع القياس للتأكد من توزيع الصفحات.', ' Check again with measuring to confirm the page layout.')
         self._after_change(text)
+        # the result in a message too: the status line alone was easy to miss
+        from .common import info
+        msg = L(f'أُصلحت {done} ملاحظة.', f'{done} point(s) fixed.')
+        if skipped:
+            msg += '\n' + L(f'لم تُصلَح {skipped}: لا إصلاح آلي لها، أو هي في أقسام معتمدة؛ تبقى في القائمة لتُصحَّح باليد.',
+                             f'{skipped} not fixed: they have no automatic fix, or are in approved sections; they stay in the list '
+                             'to be corrected by hand.')
+        if done:
+            msg += '\n' + L('زر «تراجع» يعيد ما تغيّر.', 'The «Undo» button puts back what changed.')
+        info(self, msg + fit_text)
 
     def _busy(self, text):
         from PySide6.QtWidgets import QProgressDialog
