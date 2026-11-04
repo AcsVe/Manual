@@ -10,3 +10,4 @@ dist/
 license.json
 selftest.txt
 .pytest_cache/
+.venv/

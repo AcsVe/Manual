@@ -418,9 +418,37 @@ class Database:
 
     def block_fonts(self, manual_id):
         """The fonts chosen for single blocks of a manual (the panel on the preview: «الخط»)."""
-        rows = self.conn.execute("SELECT DISTINCT json_extract(b.style, '$.font') FROM blocks b JOIN sections s "
-                                 "ON s.id = b.section_id WHERE s.manual_id = ? AND json_valid(b.style)", (manual_id,))
-        return {r[0] for r in rows if isinstance(r[0], str) and r[0]}
+        # also a font for one language of a block, a table's own font, and a font chosen for some words only
+        import re
+        out = set()
+        rows = self.conn.execute(
+            "SELECT b.style, b.ar, b.en, b.data FROM blocks b JOIN sections s ON s.id = b.section_id WHERE s.manual_id = ? "
+            "AND (b.style LIKE '%font%' OR b.ar LIKE '%font-family%' OR b.en LIKE '%font-family%' OR b.data LIKE '%font%')",
+            (manual_id,)).fetchall()
+        rows += self.conn.execute("SELECT data, '', '', '' FROM sections WHERE manual_id = ? AND data LIKE '%font%'",
+                                  (manual_id,)).fetchall()
+
+        def walk(v):
+            if isinstance(v, dict):
+                for k, x in v.items():
+                    if k == 'font' and isinstance(x, str) and x:
+                        out.add(x)
+                    else:
+                        walk(x)
+            elif isinstance(v, list):
+                for x in v:
+                    walk(x)
+            elif isinstance(v, str) and 'font-family' in v:
+                out.update(m.strip() for m in re.findall(r"font-family:\s*(?:'|&#x27;|&#39;|\")?([\w .\-]{1,64}?)(?:'|&#x27;|&#39;|\"|;|$)", v))
+        for style, ar, en, data in rows:
+            for v in (style, data):
+                try:
+                    walk(json.loads(v) if v else None)
+                except ValueError:
+                    pass
+            walk(ar)
+            walk(en)
+        return {f for f in out if f}
 
     def save_block(self, data, block_id=None):
         if not block_id and 'sort' not in data:

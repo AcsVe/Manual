@@ -10,6 +10,45 @@ _COLOR = re.compile(r'(?:^|;)\s*(color|background-color)\s*:\s*(#[0-9a-fA-F]{3,8
 _WEIGHT = re.compile(r'font-weight\s*:\s*(bold|[6-9]00)', re.I)
 _ITALIC = re.compile(r'font-style\s*:\s*italic', re.I)
 _UNDER = re.compile(r'text-decoration[^;]*underline', re.I)
+_FAMILY = re.compile(r'(?:^|;)\s*font-family\s*:\s*[\'"]?([\w .\-]{1,64}?)[\'"]?\s*(?:,[^;]*)?(?:;|$)', re.I)
+_SIZE = re.compile(r'(?:^|;)\s*font-size\s*:\s*([0-9]{1,2}(?:\.[0-9]+)?)pt', re.I)
+
+
+def span_css(style):
+    """The part of an inline style the manual keeps: text colour, highlight, font and size (in points)."""
+    parts = [f'{m.group(1).lower()}:{m.group(2)}' for m in _COLOR.finditer(style or '')]
+    fam = _FAMILY.search(style or '')
+    if fam and fam.group(1).strip():
+        parts.append(f"font-family:'{fam.group(1).strip()}'")
+    size = _SIZE.search(style or '')
+    if size and 6 <= float(size.group(1)) <= 96:
+        parts.append(f'font-size:{float(size.group(1)):g}pt')
+    return ';'.join(parts)
+
+
+def _hex6(v):
+    v = (v or '').strip()
+    m = re.fullmatch(r'#([0-9a-fA-F]{3})', v)
+    if m:
+        return '#' + ''.join(c * 2 for c in m.group(1))
+    m = re.fullmatch(r'rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', v)
+    if m:
+        return '#' + ''.join(f'{min(255, int(x)):02X}' for x in m.groups())
+    return v if re.fullmatch(r'#[0-9a-fA-F]{6}', v) else None
+
+
+def span_look(style):
+    """An inline style as {'color', 'bg', 'font', 'pt'} (what was set only)."""
+    out = {}
+    for m in _COLOR.finditer(style or ''):
+        out['bg' if m.group(1).lower() == 'background-color' else 'color'] = _hex6(m.group(2))
+    fam = _FAMILY.search(style or '')
+    if fam and fam.group(1).strip():
+        out['font'] = fam.group(1).strip()
+    size = _SIZE.search(style or '')
+    if size:
+        out['pt'] = float(size.group(1))
+    return {k: v for k, v in out.items() if v}
 
 
 class _Clean(HTMLParser):
@@ -49,7 +88,7 @@ class _Clean(HTMLParser):
                 opens.append('i')
             if _UNDER.search(style):
                 opens.append('u')
-            css = ';'.join(f'{m.group(1).lower()}:{m.group(2)}' for m in _COLOR.finditer(style))
+            css = span_css(style)
             for t in opens:
                 self.out.append(f'<{t}>')
             if css:
@@ -112,10 +151,10 @@ def lines(text):
 
 
 def runs(text):
-    """Inline formatting as runs [(text, {'b','i','u','color','href'})] — used by the Word export."""
+    """Inline formatting as runs [(text, {'b','i','u','color','bg','font','pt','href'})] — used by the Word export."""
     html = clean(text)
     out = []
-    state = {'b': 0, 'i': 0, 'u': 0, 'color': [], 'href': []}
+    state = {'b': 0, 'i': 0, 'u': 0, 'span': [], 'href': []}
 
     class P(HTMLParser):
         def handle_starttag(self, tag, attrs):
@@ -123,8 +162,7 @@ def runs(text):
             if tag in ('b', 'i', 'u'):
                 state[tag] += 1
             elif tag == 'span':
-                m = re.search(r'color:(#[0-9a-fA-F]{6})', a.get('style') or '')
-                state['color'].append(m.group(1) if m else None)
+                state['span'].append(span_look(a.get('style') or ''))
             elif tag == 'a':
                 state['href'].append(a.get('href'))
             elif tag == 'br':
@@ -133,14 +171,17 @@ def runs(text):
         def handle_endtag(self, tag):
             if tag in ('b', 'i', 'u') and state[tag]:
                 state[tag] -= 1
-            elif tag == 'span' and state['color']:
-                state['color'].pop()
+            elif tag == 'span' and state['span']:
+                state['span'].pop()
             elif tag == 'a' and state['href']:
                 state['href'].pop()
 
         def handle_data(self, data):
-            col = next((c for c in reversed(state['color']) if c), None)
-            out.append((data, {'b': state['b'] > 0, 'i': state['i'] > 0, 'u': state['u'] > 0, 'color': col,
+            look = {}
+            for s in state['span']:              # the innermost wins
+                look.update(s)
+            out.append((data, {'b': state['b'] > 0, 'i': state['i'] > 0, 'u': state['u'] > 0, 'color': look.get('color'),
+                               'bg': look.get('bg'), 'font': look.get('font'), 'pt': look.get('pt'),
                                'href': state['href'][-1] if state['href'] else None}))
     P(convert_charrefs=True).feed(html)
     return out

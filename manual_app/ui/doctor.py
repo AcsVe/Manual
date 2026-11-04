@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
                                QProgressBar, QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from ..core import doctor
+from ..core import doctor, tablefit
 from ..core.doctor import CATEGORIES, RULES, SEVERITIES
 from .common import DataTable, L, norm
 from .theme import SizedDialog, a11y, button, card, flow_row, hint, muted, name_buttons
@@ -137,6 +137,10 @@ class DoctorTab(QWidget):
         self.fix_safe = button(L('إصلاح كل الآمن', 'Fix all safe points'), 'check',
                                tip=L('الإصلاحات التي ترتّب النص ولا تغيّر شكل الصفحة', 'Fixes that tidy the text without changing how the page looks'))
         self.fix_safe.clicked.connect(self.fix_all_safe)
+        self.fix_tables = button(L('إصلاح كل الجداول', 'Fix all the tables'), 'table',
+                                 tip=L('يقيس الصفحات، ويعرض ما سيتغيّر في الجداول قبل التطبيق، ويأخذ نسخة احتياطية، ويمكن التراجع',
+                                       'Measures the pages, shows what will change in the tables before applying, takes a backup, and can be undone'))
+        self.fix_tables.clicked.connect(self.fix_all_tables)
         self.undo_btn = button(L('تراجع عن آخر إصلاح', 'Undo the last fix'), 'reset')
         self.undo_btn.clicked.connect(self.undo)
         self.undo_btn.setEnabled(False)
@@ -150,7 +154,7 @@ class DoctorTab(QWidget):
         self.progress.hide()
         self.state = muted('')
         top = QHBoxLayout()
-        for w in (run, self.measure, self.fix_safe, self.undo_btn):
+        for w in (run, self.measure, self.fix_safe, self.fix_tables, self.undo_btn):
             top.addWidget(w)
         top.addStretch(1)
         top.addWidget(self.show_hidden)
@@ -479,17 +483,119 @@ class DoctorTab(QWidget):
         ed = self.ctx.window.editor if self.ctx.window else None
         if ed is not None and ed.dirty:
             ed.save(quiet=True)
-        done, skipped, undo = doctor.apply(self.db, self.mid, chosen)
+        clipped = [x for x in chosen if x['rule'] == 'table_clipped' and x['fix'] and not x['locked']]
+        others = [x for x in chosen if x not in clipped]
+        undo = tablefit.snapshot(self.db, self.mid, {x['sid'] for x in clipped}) if clipped else None
+        done, skipped, undo2 = doctor.apply(self.db, self.mid, others) if others else (0, 0, None)
+        if undo is not None and undo2 is not None:
+            for k in ('blocks', 'sections'):           # the earlier state wins: it is what the undo puts back
+                for sid, v in undo2[k].items():
+                    undo[k].setdefault(sid, v)
+            for k in ('layout', 'manual_cols'):
+                if undo2.get(k) is not None:
+                    undo[k] = undo2[k]
+            undo['new_sections'] = undo2.get('new_sections') or []
+        undo = undo or undo2
+        fit_text = self._fit_tables([tablefit.ref_of(x) for x in clipped]) if clipped else ''
+        done += len(clipped)
         self.undo_data = undo
         self.undo_btn.setEnabled(True)
-        fixed_layout = {x['key'] for x in chosen if x['cat'] == 'layout' and x['fix'] and not x['locked']}
+        fixed_layout = {x['key'] for x in chosen if x['cat'] in ('layout', 'tables') and x['fix'] and not x['locked']}
         self.layout_issues = [x for x in self.layout_issues if x['key'] not in fixed_layout]
-        text = L(f'أُصلحت {done} ملاحظة.', f'{done} point(s) fixed.')
+        text = L(f'أُصلحت {done} ملاحظة.', f'{done} point(s) fixed.') + fit_text
         if skipped:
             text += L(f' {skipped} بلا إصلاح آلي أو في أقسام معتمدة.', f' {skipped} without an automatic fix or in approved sections.')
         if fixed_layout:
             text += L(' أعد الفحص مع القياس للتأكد من توزيع الصفحات.', ' Check again with measuring to confirm the page layout.')
         self._after_change(text)
+
+    def _busy(self, text):
+        from PySide6.QtWidgets import QProgressDialog
+        dlg = QProgressDialog(text, None, 0, 0, self)
+        dlg.setWindowTitle(L('مدقق الدليل', 'Manual checker'))
+        dlg.setMinimumDuration(0)
+        dlg.show()
+        return dlg
+
+    def _fit_tables(self, refs):
+        """The step-by-step fit of the cut-off tables, measuring the pages again after each step. Returns a line
+        for the message."""
+        dlg = self._busy(L('جارٍ ملاءمة الجداول المقصوصة خطوة خطوة وقياس الصفحات بعد كل خطوة…',
+                           'Fitting the cut-off tables step by step, measuring the pages after each step…'))
+
+        def measure(sids):
+            return tablefit.measure_clipped(self.db, self.mid, sids, workflow=self.ctx.workflow,
+                                            progress=lambda n: dlg.setLabelText(L(f'جارٍ قياس الصفحات… {n}', f'Measuring the pages… {n}')))
+
+        def step(name, n):
+            dlg.setLabelText(L(f'الخطوة: {tablefit.STEP_NAMES[name][0]} ({n} جدول)…', f'Step: {tablefit.STEP_NAMES[name][1]} ({n} table(s))…'))
+        try:
+            taken, pending = tablefit.fit(self.db, self.mid, refs, measure, step)
+        finally:
+            dlg.close()
+        by = {}
+        for st in taken.values():
+            by[st] = by.get(st, 0) + 1
+        parts_ar = [f'{tablefit.STEP_NAMES[k][0]}: {v}' for k, v in by.items()]
+        parts_en = [f'{tablefit.STEP_NAMES[k][1]}: {v}' for k, v in by.items()]
+        text = L(f' الجداول المقصوصة ({len(taken)}) توقفت عند: ' + '، '.join(parts_ar) + '.',
+                 f' The cut-off tables ({len(taken)}) stopped at: ' + ', '.join(parts_en) + '.') if taken else ''
+        if pending:
+            text += L(f' بقي {len(pending)} جدولاً مقصوصاً بعد كل الخطوات: قسّمه أو قلّل أعمدته.',
+                      f' {len(pending)} table(s) are still cut off after every step: split them or use fewer columns.')
+        return text
+
+    def fix_all_tables(self):
+        """Every table point: the pages are measured, the plan is shown, a backup is taken, the fixes are made (the
+        cut-off tables step by step) and one undo puts it all back."""
+        if not self.mid or not self.ctx.can('edit'):
+            return
+        from ..core.html import build_html
+        from ..core.pdf import audit_blocking, page_size_mm
+        from .common import confirm, info
+        ed = self.ctx.window.editor if self.ctx.window else None
+        if ed is not None and ed.dirty:
+            ed.save(quiet=True)
+        self.check_static()
+        dlg = self._busy(L('جارٍ ترتيب الصفحات وقياس الجداول…', 'Laying out the pages and measuring the tables…'))
+        try:
+            audit = audit_blocking(build_html(self.db, self.mid, 'print', workflow=self.ctx.workflow),
+                                   page_size_mm(self.db.manual(self.mid)), 900,
+                                   lambda n: dlg.setLabelText(L(f'جارٍ ترتيب الصفحات… {n}', f'Laying out the pages… {n}')))
+        finally:
+            dlg.close()
+        if audit.get('error'):
+            self.state.setText(L('تعذّر قياس الصفحات: ', 'The pages could not be measured: ') + str(audit['error']))
+        else:
+            self.layout_issues = doctor.from_audit(self.db, self.mid, audit, self.prefs(), self.ctx.workflow)
+            self.measured = audit.get('pages')
+        chosen = [x for x in self.all_issues() if x['cat'] == 'tables' and x['fix'] and not x['locked']]
+        counts, tables = tablefit.plan(chosen)
+        if not chosen:
+            self.fill()
+            info(self, L('لم يجد المدقق في الجداول ما يحتاج إلى إصلاح.', 'The checker found nothing to fix in the tables.'))
+            return
+        lines = '\n'.join(f'• {L(*RULES[r][4])}: {n}' for r, n in sorted(counts.items(), key=lambda kv: -kv[1]))
+        text = L(f'سيُصلح المدقق {len(chosen)} ملاحظة في {len(tables)} جدولاً:\n{lines}\n\n'
+                 'الجداول المقصوصة تُصلح خطوة خطوة (تضييق الخلايا، ثم تصغير الخط، ثم كسر الكلمات الطويلة، ثم صفحة أفقية) '
+                 'وتُقاس الصفحات بعد كل خطوة، فيتوقف كل جدول عند أول خطوة كافية.\n\n'
+                 'تؤخذ نسخة احتياطية من القاعدة قبل التطبيق، ويمكن التراجع بزر «تراجع عن آخر إصلاح». متابعة؟',
+                 f'The checker will fix {len(chosen)} point(s) in {len(tables)} table(s):\n{lines}\n\n'
+                 'Cut-off tables are fixed step by step (tighter cells, then a smaller font, then long words broken, then a '
+                 'landscape page) and the pages are measured after each step, so each table stops at the first step enough.\n\n'
+                 'A backup of the database is taken first, and «Undo the last fix» puts it all back. Go on?')
+        if not confirm(self, text):
+            self.fill()
+            return
+        try:
+            path = self.db.backup(self.db.get('backup_dir') or os.path.join(self.ctx.data_dir, 'backups'))
+        except OSError as e:
+            if not confirm(self, L(f'تعذّر أخذ النسخة الاحتياطية ({e}). المتابعة دونها؟', f'The backup could not be taken ({e}). Go on without it?')):
+                return
+            path = ''
+        self._fix(chosen)
+        if path:
+            self.state.setText(self.state.text() + L(f' النسخة الاحتياطية: {path}', f' Backup: {path}'))
 
     def undo(self):
         if not self.undo_data:

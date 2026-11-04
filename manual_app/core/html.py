@@ -146,6 +146,50 @@ def block_font(style):
     return f if isinstance(f, str) and re.fullmatch(r"[\w .\-]{1,64}", f) else None
 
 
+LOOK_KEYS = ('font', 'pt', 'color', 'bg')
+
+
+def _pt(v):
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    return v if 5 <= v <= 96 else None
+
+
+def look_css(look):
+    """Inline CSS of a look {'font', 'pt', 'color', 'bg'} (the parts that are set and safe)."""
+    css = []
+    f = block_font(look)
+    if f:
+        css.append(f"font-family:'{f}'")
+    pt = _pt((look or {}).get('pt'))
+    if pt:
+        css.append(f'font-size:{pt:g}pt')
+    if _hex((look or {}).get('color')):
+        css.append(f'color:{look["color"]}')
+    if _hex((look or {}).get('bg')):
+        css.append(f'background-color:{look["bg"]}')
+    return ';'.join(css)
+
+
+def side_look(style, side):
+    """What a block's look sets for one language only, and its highlight (drawn under the words, so it is inline):
+    the look that goes on the words of that side."""
+    st = style or {}
+    own = st.get(side) if isinstance(st.get(side), dict) else {}
+    out = {k: own[k] for k in LOOK_KEYS if own.get(k)}
+    if 'bg' not in out and _hex(st.get('bg')):
+        out['bg'] = st['bg']
+    return out
+
+
+def wrap(html, look):
+    """The words of one side inside a span of their own look."""
+    css = look_css(look)
+    return f'<span style="{css}">{html}</span>' if css and html else html
+
+
 def app_root():
     return getattr(sys, '_MEIPASS', os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -591,6 +635,9 @@ table.t tr:nth-child(even) td{{background:var(--ts)}} table.t thead{{display:tab
 table.t.split tr{{break-inside:auto}} table.t.compact td,table.t.compact th{{padding:.8mm 1.2mm}}
 table.t td.n{{text-align:center;width:7mm;color:#55607a}} table.t td .en{{direction:ltr;text-align:left;color:#334;font-size:.95em}}
 table.t .first{{font-weight:700}}
+table.t.keep1{{break-inside:avoid}} .tgroup{{break-inside:avoid}}
+table.t.brk{{table-layout:fixed}} table.t.brk td,table.t.brk th,table.t.brk td *,table.t.brk th *{{word-break:break-all;hyphens:auto}}
+table.t.nob td,table.t.nob th{{border-color:transparent}}
 .figure{{text-align:center;margin:0 0 4mm;break-inside:avoid}} .figure img{{max-width:100%;max-height:{ph - mg['top'] - mg['bottom'] - 25}mm}}
 .figure .cap{{font-size:.9em;color:#55607a;margin-top:1.5mm}}
 .org{{text-align:center}} .org img{{width:auto;height:auto;max-width:100%;max-height:{ph - mg['top'] - mg['bottom'] - 24}mm;object-fit:contain}}
@@ -1026,22 +1073,44 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
             if not h:
                 continue
             split = h.split(PIECE) if b['kind'] in ('paragraph', 'bullets', 'numbered', 'heading') else [h.replace(PIECE, '')]
-            look = self.block_look(b)
+            look = self.block_look(b) if b['kind'] != 'table' else ''      # a table carries its look itself
+            d = b.get('data') or {}
+            brun, group, kind = run, None, b['kind']
+            if b['kind'] == 'table':
+                if d.get('landscape') and self.lay['orientation'] != 'landscape':
+                    brun = 'T' if base == 'N' else run    # a table too wide for the page: a landscape page of its own
+                if isinstance(d.get('group'), str) and d['group'].strip():
+                    group = d['group'].strip()           # related tables kept together on one page
+                rows = [r for r in d.get('rows') or [] if any(
+                    ((x or {}).get('ar') or (x or {}).get('en')) if isinstance(x, dict) else x for x in r)]
+                if d.get('keep') or len(rows) <= 8:
+                    kind = 'tshort'
             for j, p in enumerate(split):
                 if 'data-b=' not in p[:p.find('>') + 1]:     # every piece names its block (used by the layout check)
                     p = re.sub(r'^<([a-z0-9]+)', lambda m: f'<{m.group(1)} data-b="{self._bref}"', p, count=1)
                 if look:                                     # the block's own colour and size
                     p = re.sub(r'^<([a-z0-9]+)', lambda m: f'<{m.group(1)} style="{look}"', p, count=1) \
                         if ' style="' not in p[:p.find('>') + 1] else p.replace(' style="', f' style="{look}', 1)
-                pieces.append((p, b['kind'] if j == 0 else 'paragraph', run))
+                pieces.append((p, kind if j == 0 else 'paragraph', brun, group))
         self._bref = None
         if self.mode != 'print':
-            return ''.join(p for p, _k, _r in pieces)
+            return ''.join(p for p, _k, _r, _g in pieces)
+        # a group of related tables (and the sub-heading over each) on one page together
+        for i in range(len(pieces) - 1):
+            if pieces[i][1] == 'heading' and pieces[i + 1][3] and not pieces[i][3]:
+                pieces[i] = pieces[i][:3] + (pieces[i + 1][3],)
+        grouped = []
+        for p, k, r, g in pieces:
+            if g and grouped and grouped[-1][3] == g and grouped[-1][2] == r:
+                grouped[-1] = (grouped[-1][0] + p, 'group', r, g)
+            else:
+                grouped.append((p, k, r, g))
+        pieces = [((f'<div class="keep tgroup">{p}</div>' if k == 'group' else p), k, r) for p, k, r, g in grouped]
         small = ('paragraph', 'bullets', 'numbered', 'quote', 'links')
         out, i = [], 0
         while i < len(pieces):             # a sub-heading stays on the page of what follows it
             p, k, r = pieces[i]
-            if k == 'heading' and i + 1 < len(pieces) and pieces[i + 1][1] in small and pieces[i + 1][2] == r:
+            if k == 'heading' and i + 1 < len(pieces) and pieces[i + 1][1] in small + ('tshort',) and pieces[i + 1][2] == r:
                 out.append((f'<div class="keep">{p}{pieces[i + 1][0]}</div>', 'keep', r))
                 i += 2
                 continue
@@ -1077,7 +1146,9 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
             size = int(st.get('size') or 100)
         except (TypeError, ValueError):
             size = 100
-        if size != 100 and 50 <= size <= 300:
+        if _pt(st.get('pt')):
+            css.append(f'font-size:{_pt(st["pt"]):g}pt')
+        elif size != 100 and 50 <= size <= 300:
             css.append(f'font-size:{size}%')
         if st.get('bold'):
             css.append('font-weight:700')
@@ -1088,6 +1159,10 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
     def block(self, b):
         k, d = b['kind'], b.get('data') or {}
         ar, en = b.get('ar') or '', b.get('en') or ''
+        st = b.get('style') or {}
+        la, le = side_look(st, 'ar'), side_look(st, 'en')
+        if k in ('heading', 'paragraph', 'callout', 'quote'):
+            ar, en = wrap(clean(ar), la), wrap(clean(en), le)
         al = (b.get('style') or {}).get('align')
         al = f' al-{al}' if al in ('right', 'center', 'left', 'justify') else ''
         if k == 'heading':
@@ -1096,13 +1171,15 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
             return self.pair(ar, en, 'blk' + al)
         if k in ('bullets', 'numbered'):
             tag = 'ul' if k == 'bullets' else 'ol'
+            look_a, look_e = la, le
             la, le = lines(ar), lines(en)
             if not la and not le:
                 return ''
             if self.lm == 'bi_side' and self.mode == 'print':
-                return PIECE.join(self.pair(ha, he, 'blk' + al, raw=True) for ha, he in self.list_pieces(tag, la, le))
-            ha = f'<{tag}>' + ''.join(f'<li{self.k(clean(x))}>{clean(x)}</li>' for x in la) + f'</{tag}>' if la else ''
-            he = f'<{tag}>' + ''.join(f'<li{self.k(clean(x))}>{clean(x)}</li>' for x in le) + f'</{tag}>' if le else ''
+                return PIECE.join(self.pair(ha, he, 'blk' + al, raw=True)
+                                  for ha, he in self.list_pieces(tag, la, le, look_a, look_e))
+            ha = f'<{tag}>' + ''.join(f'<li{self.k(clean(x))}>{wrap(clean(x), look_a)}</li>' for x in la) + f'</{tag}>' if la else ''
+            he = f'<{tag}>' + ''.join(f'<li{self.k(clean(x))}>{wrap(clean(x), look_e)}</li>' for x in le) + f'</{tag}>' if le else ''
             return self.pair(ha, he, 'blk' + al, raw=True)
         if k == 'callout':
             return f'<div class="callout{al}">{self.pair(ar, en)}</div>' if (ar or en) else ''
@@ -1125,7 +1202,7 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
                 return f'<div class="fullimg {"fullP" if same else "fullL"}"><img src="{uri}"{dims} alt=""></div>'
             return f'<div class="figure{al}"><img src="{uri}"{dims} alt="" style="width:{width}%;height:auto">{cap}</div>'
         if k == 'table':
-            return self.table_html(d)
+            return self.table_html(d, st)
         if k == 'links':
             items = d.get('items') or []
             if not items:
@@ -1140,7 +1217,7 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
             return f'<ul class="links">{"".join(lis)}</ul>'
         return self.pair(ar, en, 'blk')
 
-    def list_pieces(self, tag, la, le):
+    def list_pieces(self, tag, la, le, look_a=None, look_e=None):
         """A side-by-side list in groups of items, item i of one language level with item i of the other."""
         n = max(len(la), len(le))
         groups, start, size = [], 0, 0
@@ -1152,15 +1229,15 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
         out = []
         for a, b in groups:
             st = f' start="{a + 1}"' if tag == 'ol' and a else ''
-            ha = (f'<{tag}{st}>' + ''.join(f'<li{self.k(clean(x))}>{clean(x)}</li>' for x in la[a:b]) + f'</{tag}>') if la[a:b] else ''
-            he = (f'<{tag}{st}>' + ''.join(f'<li{self.k(clean(x))}>{clean(x)}</li>' for x in le[a:b]) + f'</{tag}>') if le[a:b] else ''
+            ha = (f'<{tag}{st}>' + ''.join(f'<li{self.k(clean(x))}>{wrap(clean(x), look_a)}</li>' for x in la[a:b]) + f'</{tag}>') if la[a:b] else ''
+            he = (f'<{tag}{st}>' + ''.join(f'<li{self.k(clean(x))}>{wrap(clean(x), look_e)}</li>' for x in le[a:b]) + f'</{tag}>') if le[a:b] else ''
             out.append((ha, he))
         return out
 
-    def cell(self, v):
+    def cell(self, v, la=None, le=None):
         if isinstance(v, str):
-            return clean(v)
-        a, e = clean((v or {}).get('ar') or ''), clean((v or {}).get('en') or '')
+            return wrap(clean(v), la)
+        a, e = wrap(clean((v or {}).get('ar') or ''), la), wrap(clean((v or {}).get('en') or ''), le)
         if self.lm == 'ar':
             return a or e
         if self.lm == 'en':
@@ -1169,32 +1246,52 @@ body.only-ar .en{{display:none}} body.only-en .ar{{display:none}} body.only-ar .
             return f'<div class="ar" dir="rtl">{a}</div><div class="en" dir="ltr">{e}</div>'
         return a or e
 
-    def table_html(self, d):
+    def table_html(self, d, look=None):
+        """A table. ``look``: the block's look (a table section's is ``data.look``): font, size, text colour and
+        highlight for the whole table or for one language."""
         cols = d.get('columns') or []
         rows = d.get('rows') or []
         if not cols:
             return ''
+        look = look if look is not None else (d.get('look') or {})
+        la, le = side_look(look, 'ar'), side_look(look, 'en')
         numbered = d.get('numbered')
-        th = (f'<th>{escape(self.L("no"))}</th>' if numbered else '') + ''.join(f'<th>{self.cell(c)}</th>' for c in cols)
+        th = (f'<th>{escape(self.L("no"))}</th>' if numbered else '') + ''.join(f'<th>{self.cell(c, la, le)}</th>' for c in cols)
         trs = []
+        shown = 0
         for i, r in enumerate(rows, 1):
             if not any(((x or {}).get('ar') or (x or {}).get('en')) if isinstance(x, dict) else x for x in r):
                 continue
+            shown += 1
             tds = ''.join(f'<td class="{"first" if j == 0 and d.get("first_col_bold") else ""}"{self.k(c)}>{c}</td>'
-                          for j, c in ((j, self.cell(x)) for j, x in enumerate(r[:len(cols)])))
+                          for j, c in ((j, self.cell(x, la, le)) for j, x in enumerate(r[:len(cols)])))
             trs.append(f'<tr>{"<td class=n>" + str(i) + "</td>" if numbered else ""}{tds}</tr>')
         cap = ''
         if d.get('caption_ar') or d.get('caption_en'):
-            cap = f'<div class="h-sub">{self.pair(d.get("caption_ar"), d.get("caption_en"))}</div>'
-        cls = 't' + (' split' if d.get('split_rows') else '') + (' compact' if d.get('compact') else '')
+            top = {k: look[k] for k in LOOK_KEYS if look.get(k)}         # the title outside the table: the look on it too
+            cap = (f'<div class="h-sub">{self.pair(wrap(clean(d.get("caption_ar")), dict(top, **la)), wrap(clean(d.get("caption_en")), dict(top, **le)))}'
+                   '</div>')
+        cls = 't' + (' split' if d.get('split_rows') else '') + (' compact' if d.get('compact') else '') + \
+            (' keep1' if d.get('keep') else '') + (' brk' if d.get('break_words') else '') + \
+            (' nob' if d.get('borders') is False else '')
         scale = int(d.get('scale') or 100)
-        style = [f'font-size:{0.92 * scale / 100:.3f}em'] if scale != 100 else []
+        pt = _pt(look.get('pt'))
+        style = [f'font-size:{pt * scale / 100:.2f}pt'] if pt else ([f'font-size:{0.92 * scale / 100:.3f}em'] if scale != 100 else [])
         var = {'head': '--th', 'head_text': '--tht', 'stripe': '--ts', 'border': '--tb', 'text': '--ttx'}
         for k, v in (d.get('colors') or {}).items():          # this table's own colours
             if k in var and isinstance(v, str) and re.fullmatch(r'#[0-9a-fA-F]{6}', v):
                 style.append(f'{var[k]}:{v}')
+        if _hex(look.get('color')):
+            style.append(f'--ttx:{look["color"]}')
+        if block_font(look):
+            style.append(f"--bf:'{look['font']}';font-family:'{look['font']}'")
+        if look.get('bold'):
+            style.append('font-weight:700')
         attrs = (f' style="{";".join(style)}"' if style else '') + (f' data-b="{self._bref}"' if self._bref else '')
-        return f'{cap}<table class="{cls}"{attrs}><thead><tr>{th}</tr></thead><tbody>{"".join(trs)}</tbody></table>'
+        out = f'<table class="{cls}"{attrs}><thead><tr>{th}</tr></thead><tbody>{"".join(trs)}</tbody></table>'
+        if cap and (d.get('keep') or shown <= 8) and self.mode == 'print':
+            return f'<div class="keep">{cap}{out}</div>'           # a short table never leaves its title behind
+        return cap + out
 
     def policy_footer(self, s):
         meta = s.get('meta') or {}

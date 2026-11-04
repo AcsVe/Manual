@@ -5,7 +5,7 @@ import io
 
 
 from docx import Document
-from docx.enum.section import WD_ORIENT
+from docx.enum.section import WD_ORIENT, WD_SECTION
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.oxml import OxmlElement
@@ -14,7 +14,7 @@ from docx.shared import Mm, Pt, RGBColor
 
 from . import orgchart
 from .db import CONTROL_STATUSES
-from .html import DEFAULT_DISCLAIMER, LABELS, block_font
+from .html import DEFAULT_DISCLAIMER, LABELS, _pt, block_font
 from .richtext import lines, runs
 from .templates import FONTS, PAGE_SIZES, layout_with_defaults
 
@@ -52,6 +52,82 @@ def _shade(cell, color):
     shd.set(qn('w:color'), 'auto')
     shd.set(qn('w:fill'), color.lstrip('#'))
     tcpr.append(shd)
+
+
+def _run_shade(run, color):
+    """A highlight of any colour under the words of a run (Word's own highlight has 16 colours only)."""
+    rpr = run._r.get_or_add_rPr()
+    for el in rpr.findall(qn('w:shd')):
+        rpr.remove(el)
+    shd = OxmlElement('w:shd')
+    shd.set(qn('w:val'), 'clear')
+    shd.set(qn('w:color'), 'auto')
+    shd.set(qn('w:fill'), color.lstrip('#').upper())
+    rpr.append(shd)
+
+
+def _borders(table, color, size=4):
+    """Every line of a table in one colour (``size`` in eighths of a point), as the pages show it."""
+    tblpr = table._tbl.tblPr
+    for el in tblpr.findall(qn('w:tblBorders')):
+        tblpr.remove(el)
+    borders = OxmlElement('w:tblBorders')
+    for side in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
+        el = OxmlElement(f'w:{side}')
+        el.set(qn('w:val'), 'single')
+        el.set(qn('w:sz'), str(size))
+        el.set(qn('w:space'), '0')
+        el.set(qn('w:color'), color.lstrip('#').upper())
+        borders.append(el)
+    tblpr.append(borders)
+
+
+def _cell_margins(table, top_mm, side_mm):
+    tblpr = table._tbl.tblPr
+    for el in tblpr.findall(qn('w:tblCellMar')):
+        tblpr.remove(el)
+    mar = OxmlElement('w:tblCellMar')
+    for side, mm in (('top', top_mm), ('bottom', top_mm), ('left', side_mm), ('right', side_mm), ('start', side_mm),
+                     ('end', side_mm)):
+        el = OxmlElement(f'w:{side}')
+        el.set(qn('w:w'), str(int(mm * 56.7)))          # twentieths of a point
+        el.set(qn('w:type'), 'dxa')
+        mar.append(el)
+    tblpr.append(mar)
+
+
+def _fixed_width(table):
+    """The table as wide as the page with fixed columns: long words wrap inside their cell (as «break long words»)."""
+    tblpr = table._tbl.tblPr
+    lay = OxmlElement('w:tblLayout')
+    lay.set(qn('w:type'), 'fixed')
+    tblpr.append(lay)
+    for el in tblpr.findall(qn('w:tblW')):
+        tblpr.remove(el)
+    w = OxmlElement('w:tblW')
+    w.set(qn('w:w'), '5000')
+    w.set(qn('w:type'), 'pct')
+    tblpr.append(w)
+
+
+def _keep_rows(table, keep_last):
+    """The rows never split, and each row stays on the page of the next (all of them when ``keep_last``)."""
+    rows = list(table.rows)
+    for i, row in enumerate(rows):
+        trpr = row._tr.get_or_add_trPr()
+        trpr.append(OxmlElement('w:cantSplit'))
+        if i < len(rows) - 1 or keep_last:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    p.paragraph_format.keep_with_next = True
+
+
+def _keep_next(element):
+    """Every paragraph inside a piece of the document stays on the page of what follows."""
+    for p in element.iter(qn('w:p')):
+        ppr = p.get_or_add_pPr()
+        if ppr.find(qn('w:keepNext')) is None:
+            ppr.insert(0, OxmlElement('w:keepNext'))
 
 
 def _no_borders(table):
@@ -116,7 +192,10 @@ class DocxExporter:
         _set_rtl(paragraph, rtl)
         if not rtl:
             paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        st = self._st                # the block's own look, as in the PDF
+        st = dict(self._st)          # the block's own look, as in the PDF; a look for this language only on top
+        side = st.get('ar' if rtl else 'en')
+        if isinstance(side, dict):
+            st.update({k: v for k, v in side.items() if v})
         al = st.get('align')
         if al in ('right', 'left'):
             # Word reads «left» and «right» of a right-to-left paragraph as its start and its end
@@ -130,11 +209,14 @@ class DocxExporter:
             pct = int(st.get('size') or 100)
         except (TypeError, ValueError):
             pct = 100
-        if pct != 100 and 50 <= pct <= 300:
+        if _pt(st.get('pt')):
+            size = _pt(st['pt'])
+        elif pct != 100 and 50 <= pct <= 300:
             size = (size or float(self.lay['fonts']['size'])) * pct / 100
         bold = bold or bool(st.get('bold'))
         if isinstance(st.get('color'), str) and len(st['color']) == 7:
             color = st['color']
+        bg = st.get('bg') if isinstance(st.get('bg'), str) and len(st['bg']) == 7 else None
         bf = block_font(st)
         for t, f in runs(text) if ('<' in (text or '')) else [(text or '', {})]:
             if t == '\n':
@@ -144,33 +226,39 @@ class DocxExporter:
             r.bold = bold or f.get('b') or None
             r.italic = f.get('i') or None
             r.underline = f.get('u') or None
-            if size:
-                r.font.size = Pt(size)
-            col = color or f.get('color')
+            if f.get('pt') or size:
+                r.font.size = Pt(f.get('pt') or size)
+            col = f.get('color') or color             # words coloured one by one keep their colour
             if col:
                 r.font.color.rgb = _rgb(col)
+            if f.get('bg') or bg:
+                _run_shade(r, f.get('bg') or bg)
+            fam = block_font({'font': f.get('font')}) or bf
             if rtl:
-                _run_rtl(r, bf or self.font_ar)
+                _run_rtl(r, fam or self.font_ar)
             else:
-                r.font.name = bf or self.font_en
+                r.font.name = fam or self.font_en
 
     def pair(self, container, ar, en, size=None, bold=False, color=None, style=None):
         """One piece of text in the manual's language mode (side by side = a two-column table without borders)."""
         ar, en = ar or '', en or ''
         if not ar and not en:
             return
+        made = []
         if self.lm == 'ar' or (self.lm == 'bi_stack'):
             if ar:
                 p = container.add_paragraph(style=style)
                 self.write_runs(p, ar, True, size, bold, color)
+                made.append(p._p)
             if self.lm == 'bi_stack' and en:
                 p = container.add_paragraph(style=style)
                 self.write_runs(p, en, False, size, bold, color)
-            return
+                made.append(p._p)
+            return made
         if self.lm == 'en':
             p = container.add_paragraph(style=style)
             self.write_runs(p, en or ar, False, size, bold, color)
-            return
+            return [p._p]
         t = container.add_table(rows=1, cols=2)
         _no_borders(t)
         t.autofit = True
@@ -180,6 +268,7 @@ class DocxExporter:
             pe.style = pa.style = style
         self.write_runs(pe, en, False, size, bold, color)
         self.write_runs(pa, ar, True, size, bold, color)
+        return [t._tbl]
 
     def list_pair(self, ar, en, numbered):
         style = 'List Number' if numbered else 'List Bullet'
@@ -210,50 +299,122 @@ class DocxExporter:
                 self.write_runs(p, x, rtl)
 
     # ── tables ───────────────────────────────────────────────────────
-    def cell_text(self, cell, v, header=False, color=None):
+    def cell_text(self, cell, v, header=False, color=None, size=9, bold=False):
         p = cell.paragraphs[0]
         if isinstance(v, str):
             v = {'ar': v, 'en': ''}
         a, e = (v or {}).get('ar') or '', (v or {}).get('en') or ''
         if color is None:
             color = self.c['table_head_text'] if header else None
+        bold = header or bold
         if self.lm == 'en' or (not a and e):
-            self.write_runs(p, e or a, False, 9, header, color)
+            self.write_runs(p, e or a, False, size, bold, color)
         elif self.lm == 'ar' or not e or a == e:
-            self.write_runs(p, a, True, 9, header, color)
+            self.write_runs(p, a, True, size, bold, color)
         else:
-            self.write_runs(p, a, True, 9, header, color)
-            self.write_runs(cell.add_paragraph(), e, False, 8.5, header, color)
+            self.write_runs(p, a, True, size, bold, color)
+            self.write_runs(cell.add_paragraph(), e, False, size * 0.95, bold, color)
 
-    def table(self, cols, rows, numbered=False, colors=None):
+    def table(self, cols, rows, numbered=False, colors=None, d=None, look=None, keep_next=False):
+        """A table as the pages show it: its colours and borders, its font and size, tight cells, a landscape page,
+        kept on one page (``d``: the table's data; ``look``: the block's look)."""
+        d = d or {}
+        look = dict(look or {})
         own = colors or {}
         head = own.get('head') or self.c['table_head']
         head_text = own.get('head_text') or self.c['table_head_text']
         stripe = own.get('stripe') or self.c.get('table_stripe')
-        text = own.get('text') or None
+        border = own.get('border') or self.c.get('table_border') or self.c.get('box_border')
+        text = look.get('color') if isinstance(look.get('color'), str) and len(look['color']) == 7 else \
+            (own.get('text') or self.c.get('table_text') or None)
+        scale = int(d.get('scale') or 100) / 100
+        size = (_pt(look.get('pt')) or float(self.lay['fonts']['size']) * 0.92) * scale
         rows = [r for r in rows if any(((x or {}).get('ar') or (x or {}).get('en')) if isinstance(x, dict) else x for x in r)]
+        landscape = d.get('landscape') and self.lay['orientation'] != 'landscape'
+        if landscape:
+            self.turn(True)
+        if d.get('caption_ar') or d.get('caption_en'):
+            for el in self.pair(self.doc, d.get('caption_ar'), d.get('caption_en'), bold=True, color=self.c['secondary']) or []:
+                _keep_next(el)
         n = len(cols) + (1 if numbered else 0)
         t = self.doc.add_table(rows=1 + len(rows), cols=n)
         t.style = 'Table Grid'
         t.alignment = WD_TABLE_ALIGNMENT.CENTER
+        if d.get('borders') is False:
+            _no_borders(t)
+        elif border:
+            _borders(t, border)
+        _cell_margins(t, *((0.8, 1.2) if d.get('compact') else (1.4, 2.0)))
+        if d.get('break_words'):
+            _fixed_width(t)
         heads = ([{'ar': 'م', 'en': 'No.'}] if numbered else []) + list(cols)
         if self.lm != 'en':
             tblpr = t._tbl.tblPr
             tblpr.append(OxmlElement('w:bidiVisual'))
-        for j, h in enumerate(heads):
-            c = t.cell(0, j)
-            _shade(c, head)
-            self.cell_text(c, h, header=True, color=head_text)
-        for i, r in enumerate(rows, 1):
-            vals = ([str(i)] if numbered else []) + list(r[:len(cols)])
-            for j, v in enumerate(vals):
-                if stripe and i % 2 == 0 and stripe.upper() != '#FFFFFF':
-                    _shade(t.cell(i, j), stripe)
-                self.cell_text(t.cell(i, j), v, color=text)
+        # the size and the colours are given here; the rest of the block's look (font, highlight, one language) stays
+        saved = self._st
+        self._st = {k: v for k, v in (saved or {}).items() if k not in ('pt', 'size', 'color', 'bold')}
+        for sd in ('ar', 'en'):
+            if isinstance(self._st.get(sd), dict):
+                self._st[sd] = {k: v for k, v in self._st[sd].items() if k not in ('pt', 'color')}
+        self._st.update({k: look[k] for k in ('font', 'bg') if look.get(k) and k not in self._st})
+        try:
+            for j, h in enumerate(heads):
+                c = t.cell(0, j)
+                _shade(c, head)
+                self.cell_text(c, h, header=True, color=head_text, size=size)
+            for i, r in enumerate(rows, 1):
+                vals = ([str(i)] if numbered else []) + list(r[:len(cols)])
+                for j, v in enumerate(vals):
+                    if stripe and i % 2 == 0 and stripe.upper() != '#FFFFFF':
+                        _shade(t.cell(i, j), stripe)
+                    first = d.get('first_col_bold') and j == (1 if numbered else 0)
+                    self.cell_text(t.cell(i, j), v, color=text, size=size, bold=bool(first or look.get('bold')))
+        finally:
+            self._st = saved
         # the header row repeats on every page
         trpr = t.rows[0]._tr.get_or_add_trPr()
         trpr.append(OxmlElement('w:tblHeader'))
-        self.doc.add_paragraph()
+        if d.get('keep') or keep_next:
+            _keep_rows(t, keep_next)
+        elif not d.get('split_rows'):
+            for row in t.rows:               # a row is never cut between two pages, as in the PDF
+                row._tr.get_or_add_trPr().append(OxmlElement('w:cantSplit'))
+        after = self.doc.add_paragraph()
+        if keep_next:
+            after.paragraph_format.keep_with_next = True
+        if landscape:
+            self.turn(False)
+        return t
+
+    def turn(self, landscape):
+        """A new page in the other orientation (a table too wide for the page), or back to the manual's."""
+        lay = self.lay
+        w, h = PAGE_SIZES.get(lay['page_size'], PAGE_SIZES['A4'])
+        sec = self.doc.add_section(WD_SECTION.NEW_PAGE)
+        if landscape:
+            sec.orientation = WD_ORIENT.LANDSCAPE
+            sec.page_width, sec.page_height = Mm(max(w, h)), Mm(min(w, h))
+        else:
+            sec.orientation = WD_ORIENT.PORTRAIT
+            sec.page_width, sec.page_height = Mm(min(w, h)), Mm(max(w, h))
+
+    def write_blocks(self, blocks):
+        """The blocks of a section; a sub-heading stays with the table under it, and the tables of one group (and
+        the sub-headings between them) stay together on one page, as in the PDF."""
+        for i, b in enumerate(blocks):
+            nxt = blocks[i + 1] if i + 1 < len(blocks) else None
+            g = ((b.get('data') or {}).get('group') or '').strip() if b['kind'] == 'table' else ''
+            keep = False
+            if b['kind'] == 'heading' and nxt and nxt['kind'] == 'table':
+                keep = True
+            elif g:
+                for later in blocks[i + 1:]:
+                    if later['kind'] == 'heading':
+                        continue
+                    keep = later['kind'] == 'table' and ((later.get('data') or {}).get('group') or '').strip() == g
+                    break
+            self.block(b, keep)
 
     # ── document ─────────────────────────────────────────────────────
     def setup(self):
@@ -355,8 +516,7 @@ class DocxExporter:
     def k_text(self, s, depth, heading=True):
         if heading:
             self.heading(s, depth + 1)
-        for b in self.db.blocks(s['id']):
-            self.block(b)
+        self.write_blocks(self.db.blocks(s['id']))
 
     def k_policy(self, s, depth):
         self.k_text(s, depth)
@@ -376,8 +536,7 @@ class DocxExporter:
         meta = self.m.get('meta') or {}
         blocks = self.db.blocks(s['id'])
         if blocks:
-            for b in blocks:
-                self.block(b)
+            self.write_blocks(blocks)
         else:
             self.pair(self.doc, meta.get('disclaimer_ar') or DEFAULT_DISCLAIMER[0], meta.get('disclaimer_en') or DEFAULT_DISCLAIMER[1], bold=True)
 
@@ -400,9 +559,10 @@ class DocxExporter:
         self.heading(s, depth + 1)
         d = s.get('data') or {}
         if d.get('columns'):
-            self.table(d['columns'], d.get('rows') or [], d.get('numbered'), d.get('colors'))
-        for b in self.db.blocks(s['id']):
-            self.block(b)
+            landscape = (s.get('style') or {}).get('orientation') == 'landscape' and self.lay['orientation'] != 'landscape'
+            self.table(d['columns'], d.get('rows') or [], d.get('numbered'), d.get('colors'),
+                       dict(d, landscape=landscape or d.get('landscape')), d.get('look'))
+        self.write_blocks(self.db.blocks(s['id']))
 
     def k_orgchart(self, s, depth):
         self.heading(s, depth + 1)
@@ -416,8 +576,7 @@ class DocxExporter:
             p = self.doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p.add_run().add_picture(io.BytesIO(png), width=width)
-        for b in self.db.blocks(s['id']):
-            self.block(b)
+        self.write_blocks(self.db.blocks(s['id']))
 
     def k_compliance(self, s, depth):
         self.heading(s, depth + 1)
@@ -435,18 +594,20 @@ class DocxExporter:
     k_links = k_text
     k_image = k_text
 
-    def block(self, b):
+    def block(self, b, keep_next=False):
         self._st = b.get('style') or {}
         try:
-            self._block(b)
+            self._block(b, keep_next)
         finally:
             self._st = {}
 
-    def _block(self, b):
+    def _block(self, b, keep_next=False):
         k, d = b['kind'], b.get('data') or {}
         ar, en = b.get('ar') or '', b.get('en') or ''
         if k == 'heading':
-            self.pair(self.doc, ar, en, bold=True, color=self.c['secondary'])
+            for el in self.pair(self.doc, ar, en, bold=True, color=self.c['secondary']) or []:
+                if keep_next:
+                    _keep_next(el)
         elif k in ('paragraph', 'quote'):
             self.pair(self.doc, ar, en)
         elif k == 'callout':
@@ -466,7 +627,7 @@ class DocxExporter:
             self.page_break()
         elif k == 'table':
             if d.get('columns'):
-                self.table(d['columns'], d.get('rows') or [], d.get('numbered'), d.get('colors'))
+                self.table(d['columns'], d.get('rows') or [], d.get('numbered'), d.get('colors'), d, b.get('style'), keep_next)
         elif k == 'image':
             a = self.db.asset(int(d['asset_id'])) if d.get('asset_id') else None
             if a:

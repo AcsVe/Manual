@@ -457,6 +457,8 @@ class Inspector(QFrame):
         def set_style(**kw):
             def fn(bl):
                 stl = dict(bl[i].get('style') or {})
+                if 'size' in kw:
+                    stl.pop('pt', None)          # a size in per cent here replaces one in points from the bar
                 for k, v in kw.items():
                     if v in (None, '', 100) and k in ('color', 'align', 'size', 'font'):
                         stl.pop(k, None)

@@ -5,7 +5,7 @@ import os
 
 from PySide6.QtCore import QDate, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut, QTextCharFormat, QTextCursor
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDateEdit, QDialogButtonBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDateEdit, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
                                QInputDialog, QLabel, QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
                                QTableWidget, QTableWidgetItem, QTextEdit, QToolButton, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
@@ -166,15 +166,81 @@ SYMBOLS = (
 )
 
 
+class SectionsDialog(SizedDialog):
+    """The sections the formatting bar applies to («أقسام مختارة»): a tick per section, by the tree of the manual."""
+
+    def __init__(self, parent, db, mid, chosen=()):
+        super().__init__(parent)
+        self.setWindowTitle(L('اختيار الأقسام', 'Choose the sections'))
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        a11y(self.tree, L('أقسام الدليل', 'Manual sections'))
+        items = {}
+        for s, _depth in db.flat(mid, active_only=False):
+            t = (s.get('title_ar') or s.get('title_en') or '') if L('a', 'b') == 'a' else (s.get('title_en') or s.get('title_ar') or '')
+            it = QTreeWidgetItem([t or L('(بلا عنوان)', '(untitled)')])
+            it.setData(0, Qt.UserRole, s['id'])
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(0, Qt.Checked if s['id'] in chosen else Qt.Unchecked)
+            parent_it = items.get(s['parent_id'])
+            (parent_it.addChild(it) if parent_it else self.tree.addTopLevelItem(it))
+            items[s['id']] = it
+        self.tree.expandAll()
+        self._items = items
+        all_ = button(L('تحديد الكل', 'Select all'), 'select_all')
+        all_.clicked.connect(lambda: self._all(True))
+        none = button(L('إلغاء التحديد', 'Select none'), 'select_none')
+        none.clicked.connect(lambda: self._all(False))
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText(L('موافق', 'OK'))
+        bb.button(QDialogButtonBox.Cancel).setText(L('إلغاء', 'Cancel'))
+        name_buttons(bb)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay = QVBoxLayout(self)
+        lay.addWidget(muted(L('علّم الأقسام التي يُطبَّق عليها التنسيق:', 'Tick the sections the formatting goes on:')))
+        lay.addWidget(self.tree, 1)
+        lay.addWidget(flow_row([all_, none]))
+        lay.addWidget(bb)
+        self.resize(520, 560)
+
+    def _all(self, on):
+        for it in self._items.values():
+            it.setCheckState(0, Qt.Checked if on else Qt.Unchecked)
+
+    def chosen(self):
+        return [sid for sid, it in self._items.items() if it.checkState(0) == Qt.Checked]
+
+
+def _swatch(btn, color, empty_text):
+    """A colour button shows the colour chosen (or that none is)."""
+    if color:
+        light = QColor(color).lightness() > 150
+        btn.setStyleSheet(f'QToolButton{{background:{color};color:{"#1e293b" if light else "#ffffff"};'
+                          'border:1px solid #c9d4e3;border-radius:6px;padding:2px 8px}}')
+    else:
+        btn.setStyleSheet('')
+    btn.setToolTip(empty_text if not color else f'{empty_text}: {color}')
+
+
 class FormatBar(QWidget):
-    """Bold, italic, underline, colour and link for the text box that has the focus."""
+    """Formatting for the text being written, and for more than that: bold, italic, underline, link, symbols, and
+    the font, size, text colour and highlight with «apply to» — the selected text, the block, the section, chosen
+    sections, a range of pages or the whole manual — narrowed to paragraphs, sub-headings or tables and to one
+    language if wanted. Before a change wider than the selection it shows how many places change, takes a backup
+    and keeps an undo."""
 
     def __init__(self):
         super().__init__()
         self.target = None
-        lay = QHBoxLayout(self)
+        self.host = None                      # the editor page (set by it): the open section and its blocks
+        self.look = {}                        # what was chosen in the bar and not applied yet
+        self.chosen_sections = []
+        self.undo_data = None
+        lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
+        row1 = []
         for text, tip, fn in (('B', L('غامق', 'Bold'), self.bold), ('I', L('مائل', 'Italic'), self.italic),
                               ('U', L('تسطير', 'Underline'), self.underline)):
             b = QToolButton()
@@ -187,9 +253,46 @@ class FormatBar(QWidget):
             b.setToolTip(tip)
             a11y(b, tip)
             b.clicked.connect(fn)
-            lay.addWidget(b)
-        col = icon_button('palette', L('لون النص', 'Text colour'))
-        col.clicked.connect(self.color)
+            row1.append(b)
+        from .fonts import FontPicker
+        self.font = FontPicker(False, inherit=L('الخط', 'Font'))
+        self.font.set_value('')
+        fit(self.font, 190)
+        a11y(self.font, L('الخط', 'Font'))
+        self.font.currentIndexChanged.connect(self._font_changed)
+        self.size = QDoubleSpinBox()
+        self.size.setRange(0, 72)
+        self.size.setDecimals(1)
+        self.size.setSingleStep(1)
+        self.size.setSpecialValueText(L('الحجم', 'Size'))
+        self.size.setSuffix(L(' نقطة', ' pt'))
+        self.size.setKeyboardTracking(False)
+        fit(self.size, 110)
+        a11y(self.size, L('حجم الخط بالنقاط', 'Font size in points'))
+        self.size.valueChanged.connect(self._size_changed)
+        self.color_btn = QToolButton()
+        self.color_btn.setText(L('لون النص', 'Text colour'))
+        self.color_btn.setIcon(icon('palette', '#334155'))
+        self.color_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        a11y(self.color_btn, L('لون النص', 'Text colour'))
+        cm = QMenu(self.color_btn)
+        cm.addAction(L('اختيار لون…', 'Choose a colour…'), lambda: self._pick('color'))
+        cm.addAction(L('كما في الدليل', 'As the manual'), lambda: self._set('color', ''))
+        self.color_btn.setMenu(cm)
+        self.color_btn.setPopupMode(QToolButton.InstantPopup)
+        self.bg_btn = QToolButton()
+        self.bg_btn.setText(L('لون التظليل', 'Highlight'))
+        self.bg_btn.setIcon(icon('edit', '#334155'))
+        self.bg_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        a11y(self.bg_btn, L('لون التظليل', 'Highlight colour'))
+        bm = QMenu(self.bg_btn)
+        for name, col in ((('أصفر', 'Yellow'), '#FFF59D'), (('أخضر', 'Green'), '#C8E6C9'), (('أزرق', 'Blue'), '#BBDEFB'),
+                          (('وردي', 'Pink'), '#F8BBD0'), (('رمادي', 'Grey'), '#E0E0E0')):
+            bm.addAction(L(*name), lambda c=col: self._set('bg', c))
+        bm.addAction(L('اختيار لون…', 'Choose a colour…'), lambda: self._pick('bg'))
+        bm.addAction(L('بلا تظليل', 'No highlight'), lambda: self._set('bg', ''))
+        self.bg_btn.setMenu(bm)
+        self.bg_btn.setPopupMode(QToolButton.InstantPopup)
         link = icon_button('link', L('رابط', 'Link'))
         link.clicked.connect(self.link)
         plain = icon_button('reset', L('إزالة التنسيق', 'Clear formatting'))
@@ -205,10 +308,51 @@ class FormatBar(QWidget):
                 sub.addAction(f'{ch}    {L(nar, nen)}', lambda c=ch: self.insert(c))
         sym.setMenu(menu)
         sym.setPopupMode(QToolButton.InstantPopup)
-        for b in (col, link, plain, sym):
-            lay.addWidget(b)
-        lay.addStretch(1)
+        row1 += [self.font, self.size, self.color_btn, self.bg_btn, link, plain, sym]
 
+        from ..core import formatting as FMT
+        self.scope = QComboBox()
+        for k, (ar, en) in FMT.SCOPES.items():
+            self.scope.addItem(L(ar, en), k)
+        fit(self.scope, 150)
+        a11y(self.scope, L('تطبيق على', 'Apply to'))
+        self.scope.currentIndexChanged.connect(self._scope_changed)
+        self.kinds = QComboBox()
+        for k, (ar, en) in FMT.KINDS.items():
+            self.kinds.addItem(L(ar, en), k)
+        fit(self.kinds, 140)
+        a11y(self.kinds, L('ما يشمله التطبيق', 'What it covers'))
+        self.langs = QComboBox()
+        for k, (ar, en) in FMT.LANGS.items():
+            self.langs.addItem(L(ar, en), k)
+        fit(self.langs, 150)
+        a11y(self.langs, L('اللغة', 'Language'))
+        self.pick_secs = button(L('الأقسام…', 'Sections…'), 'list')
+        self.pick_secs.clicked.connect(self.choose_sections)
+        self.page_from = QSpinBox()
+        self.page_from.setRange(1, 9999)
+        self.page_from.setPrefix(L('من ', 'from '))
+        fit(self.page_from, 90)
+        a11y(self.page_from, L('من الصفحة', 'From page'))
+        self.page_to = QSpinBox()
+        self.page_to.setRange(1, 9999)
+        self.page_to.setPrefix(L('إلى ', 'to '))
+        fit(self.page_to, 90)
+        a11y(self.page_to, L('إلى الصفحة', 'To page'))
+        self.apply_btn = button(L('تطبيق', 'Apply'), 'check', 'primary',
+                                tip=L('يعرض عدد ما سيتغيّر قبل التطبيق، ويأخذ نسخة احتياطية', 'Shows how much changes before applying, and takes a backup'))
+        self.apply_btn.clicked.connect(self.apply)
+        self.undo_btn = button(L('تراجع عن التنسيق', 'Undo the formatting'), 'reset')
+        self.undo_btn.clicked.connect(self.undo)
+        self.undo_btn.setEnabled(False)
+        self.scope_label = muted(L('تطبيق على:', 'Apply to:'))
+        row2 = [self.scope_label, self.scope, self.kinds, self.langs, self.pick_secs, self.page_from, self.page_to,
+                self.apply_btn, self.undo_btn]
+        lay.addWidget(flow_row(row1, 4))
+        lay.addWidget(flow_row(row2, 6))
+        self._scope_changed()
+
+    # ── the text box being written ───────────────────────────────────
     def insert(self, ch):
         if self.target:
             self.target.insertPlainText(ch)
@@ -243,11 +387,7 @@ class FormatBar(QWidget):
         self._merge(f)
 
     def color(self):
-        c = QColorDialog.getColor(QColor('#0B3D91'), self, L('لون النص', 'Text colour'))
-        if c.isValid():
-            f = QTextCharFormat()
-            f.setForeground(c)
-            self._merge(f)
+        self._pick('color')
 
     def link(self):
         if not self.target:
@@ -262,6 +402,192 @@ class FormatBar(QWidget):
         if self.target:
             c = self.target.textCursor()
             c.setCharFormat(QTextCharFormat())
+
+    # ── font, size and colours ───────────────────────────────────────
+    def _selection(self):
+        return self.scope.currentData() == 'selection'
+
+    def _font_changed(self, *_):
+        self._set('font', self.font.value())
+
+    def _size_changed(self, v):
+        self._set('pt', round(v, 1) if v else None)
+
+    def _pick(self, key):
+        start = self.look.get(key) or ('#0B3D91' if key == 'color' else '#FFF59D')
+        c = QColorDialog.getColor(QColor(start), self, L('لون النص', 'Text colour') if key == 'color' else L('لون التظليل', 'Highlight colour'))
+        if c.isValid():
+            self._set(key, c.name().upper())
+
+    def _set(self, key, value):
+        """A value chosen in the bar: on the selected text at once; for a wider scope it waits for «تطبيق».
+        ``''`` means «as the manual» (removes that formatting); None means «leave as it is»."""
+        if value is None:
+            self.look.pop(key, None)
+        else:
+            self.look[key] = value
+        if key == 'color':
+            _swatch(self.color_btn, value, L('لون النص', 'Text colour'))
+        elif key == 'bg':
+            _swatch(self.bg_btn, value, L('لون التظليل', 'Highlight colour'))
+        if self._selection() and value is not None:
+            self._on_selection({key: value})
+
+    def _on_selection(self, look):
+        if not self.target:
+            return
+        f = QTextCharFormat()
+        for k, v in look.items():
+            if k == 'font':
+                if v:
+                    f.setFontFamilies([v])
+                else:
+                    f.clearProperty(QTextCharFormat.FontFamilies)
+            elif k == 'pt' and v:
+                f.setFontPointSize(float(v))
+            elif k == 'color':
+                f.setForeground(QColor(v)) if v else f.clearForeground()
+            elif k == 'bg':
+                f.setBackground(QColor(v)) if v else f.clearBackground()
+        c = self.target.textCursor()
+        if not c.hasSelection():
+            c.select(QTextCursor.WordUnderCursor)
+        if look.get('color') == '' or look.get('bg') == '' or look.get('font') == '':
+            # «as the manual»: the property is taken off the selected words
+            fmt = c.charFormat()
+            if look.get('color') == '':
+                fmt.clearForeground()
+            if look.get('bg') == '':
+                fmt.clearBackground()
+            if look.get('font') == '':
+                fmt.clearProperty(QTextCharFormat.FontFamilies)
+            c.setCharFormat(fmt)
+        c.mergeCharFormat(f)
+        self.target.setFocus()
+
+    # ── apply to ─────────────────────────────────────────────────────
+    def _scope_changed(self, *_):
+        k = self.scope.currentData()
+        self.pick_secs.setVisible(k == 'sections')
+        self.page_from.setVisible(k == 'pages')
+        self.page_to.setVisible(k == 'pages')
+        wide = k != 'selection'
+        self.kinds.setVisible(wide and k != 'block')
+        self.langs.setVisible(wide)
+        self.apply_btn.setText(L('تطبيق', 'Apply') if wide else L('تطبيق على المحدد', 'Apply to the selection'))
+
+    def choose_sections(self):
+        h = self.host
+        if not h or not h.mid:
+            return
+        d = SectionsDialog(self, h.db, h.mid, self.chosen_sections)
+        if d.exec():
+            self.chosen_sections = d.chosen()
+            self.pick_secs.setText(L(f'الأقسام ({len(self.chosen_sections)})…', f'Sections ({len(self.chosen_sections)})…'))
+
+    def _pages(self):
+        """The blocks on the chosen pages: the manual is laid out as it prints and each page's content is read."""
+        from PySide6.QtWidgets import QProgressDialog
+        from ..core import formatting as FMT
+        from ..core.html import build_html
+        from ..core.pdf import audit_blocking, page_size_mm
+        h = self.host
+        first, last = sorted((self.page_from.value(), self.page_to.value()))
+        dlg = QProgressDialog(L('جارٍ ترتيب الصفحات لمعرفة ما في الصفحات المختارة…', 'Laying out the pages to find what is on the chosen ones…'),
+                              None, 0, 0, self)
+        dlg.setWindowTitle(L('نطاق الصفحات', 'Range of pages'))
+        dlg.setMinimumDuration(0)
+        dlg.show()
+        try:
+            a = audit_blocking(build_html(h.db, h.mid, 'print', workflow=h.ctx.workflow), page_size_mm(h.db.manual(h.mid)), 600,
+                               lambda n: dlg.setLabelText(L(f'جارٍ ترتيب الصفحات… {n}', f'Laying out the pages… {n}')))
+        finally:
+            dlg.close()
+        if not a.get('pmap'):
+            error(self, L('تعذّر ترتيب الصفحات.', 'The pages could not be laid out.'))
+            return None
+        if first > len(a['pmap']):
+            error(self, L(f'في الدليل {len(a["pmap"])} صفحة فقط.', f'The manual has {len(a["pmap"])} pages only.'))
+            return None
+        return FMT.page_refs(a['pmap'], first, min(last, len(a['pmap'])))
+
+    def apply(self):
+        if self._selection():
+            if not self.look:
+                info(self, L('اختر خطاً أو حجماً أو لوناً أولاً.', 'Choose a font, a size or a colour first.'))
+            else:
+                self._on_selection(self.look)
+            return
+        from ..core import formatting as FMT
+        h = self.host
+        if not h or not h.mid or not h.ctx.can('edit'):
+            return
+        look = {k: v for k, v in self.look.items() if v is not None}
+        if not look:
+            info(self, L('اختر خطاً أو حجماً أو لون نص أو لون تظليل أولاً، ثم اضغط «تطبيق».',
+                         'Choose a font, a size, a text colour or a highlight first, then press «Apply».'))
+            return
+        scope = self.scope.currentData()
+        if h.dirty:
+            h.save(quiet=True)
+        block = h.current_block_index() if scope == 'block' else None
+        if scope == 'block' and block is None:
+            info(self, L('اضغط داخل الكتلة المطلوبة أولاً.', 'Click inside the block first.'))
+            return
+        if scope in ('block', 'section') and not h.sid:
+            return
+        if scope == 'sections' and not self.chosen_sections:
+            self.choose_sections()
+            if not self.chosen_sections:
+                return
+        pages = self._pages() if scope == 'pages' else None
+        if scope == 'pages' and pages is None:
+            return
+        refs = FMT.targets(h.db, h.mid, scope, self.kinds.currentData() if scope != 'block' else 'all',
+                           current=h.sid, block=block, chosen=self.chosen_sections, pages=pages)
+        if not refs:
+            info(self, L('لا يوجد ما ينطبق عليه التنسيق في النطاق المختار.', 'Nothing in the chosen scope takes this formatting.'))
+            return
+        p = FMT.plan(h.db, refs)
+        names = []
+        if 'font' in look:
+            names.append(L(f'الخط «{look["font"]}»' if look['font'] else 'الخط كما في الدليل',
+                           f'font «{look["font"]}»' if look['font'] else 'font as the manual'))
+        if 'pt' in look:
+            names.append(L(f'الحجم {look["pt"]:g} نقطة', f'size {look["pt"]:g} pt'))
+        if 'color' in look:
+            names.append(L(f'لون النص {look["color"]}' if look['color'] else 'لون النص كما في الدليل',
+                           f'text colour {look["color"]}' if look['color'] else 'text colour as the manual'))
+        if 'bg' in look:
+            names.append(L(f'التظليل {look["bg"]}' if look['bg'] else 'بلا تظليل',
+                           f'highlight {look["bg"]}' if look['bg'] else 'no highlight'))
+        lang = self.langs.currentData()
+        text = L(f'سيتغيّر {p["total"]} موضعاً ({p["blocks"]} كتلة و{p["tables"]} جدول قسم) في {p["sections"]} قسماً:\n'
+                 f'{"، ".join(names)} — {L(*FMT.LANGS[lang])}.\n\nتؤخذ نسخة احتياطية من القاعدة قبل التطبيق، ويمكن التراجع بعده. متابعة؟',
+                 f'{p["total"]} place(s) will change ({p["blocks"]} block(s) and {p["tables"]} table section(s)) in {p["sections"]} section(s):\n'
+                 f'{", ".join(names)} — {L(*FMT.LANGS[lang])}.\n\nA backup of the database is taken first, and it can be undone afterwards. Go on?')
+        if not confirm(self, text):
+            return
+        try:
+            h.db.backup(h.db.get('backup_dir') or os.path.join(h.ctx.data_dir, 'backups'))
+        except OSError as e:
+            if not confirm(self, L(f'تعذّر أخذ النسخة الاحتياطية ({e}). المتابعة دونها؟', f'The backup could not be taken ({e}). Go on without it?')):
+                return
+        n, undo = FMT.apply(h.db, h.mid, refs, look, lang)
+        self.undo_data = undo
+        self.undo_btn.setEnabled(bool(undo))
+        h.after_format(L(f'طُبِّق التنسيق على {n} موضعاً.', f'The formatting went on {n} place(s).'))
+
+    def undo(self):
+        h = self.host
+        if not self.undo_data or not h:
+            return
+        if h.dirty:
+            h.save(quiet=True)
+        doctor.undo(h.db, self.undo_data)
+        self.undo_data = None
+        self.undo_btn.setEnabled(False)
+        h.after_format(L('أُعيد التنسيق إلى ما كان عليه.', 'The formatting is back as it was.'))
 
 
 # ── tables and links ────────────────────────────────────────────────────────────────────────────────
@@ -410,7 +736,8 @@ class TableEditor(QWidget):
     colors_for_all = Signal(dict)
     design_colors = None                 # set by the editor: the manual's table colours
 
-    def __init__(self, data=None):
+    def __init__(self, data=None, section=False):
+        """``section``: the table of a table section (its landscape page is the section's own page direction)."""
         super().__init__()
         self.data = data or table_data('custom')
         self.layer = 'ar'
@@ -432,6 +759,34 @@ class TableEditor(QWidget):
         self.bold = QCheckBox(L('العمود الأول غامق', 'First column bold'))
         self.bold.setChecked(bool(self.data.get('first_col_bold')))
         self.bold.toggled.connect(lambda v: (self.data.update(first_col_bold=v), self.changed.emit()))
+        self.keep = QCheckBox(L('إبقاء الجدول في صفحة واحدة', 'Keep the table on one page'))
+        self.keep.setToolTip(L('لا ينقسم الجدول بين صفحتين: ينتقل كاملاً إلى الصفحة التالية إن لم يتسع له باقي الصفحة',
+                               'The table is never split: it moves whole to the next page when the rest of the page is too short'))
+        self.keep.setChecked(bool(self.data.get('keep')))
+        self.keep.toggled.connect(lambda v: (self._flag('keep', v), self.changed.emit()))
+        self.group = QComboBox()
+        self.group.setEditable(True)
+        self.group.addItem('')
+        for g in TableEditor.group_names:
+            self.group.addItem(g)
+        self.group.setCurrentText(self.data.get('group') or '')
+        self.group.lineEdit().setPlaceholderText(L('مجموعة جداول مرتبطة (اختياري)', 'Group of related tables (optional)'))
+        self.group.setToolTip(L('الجداول المتتالية التي تحمل اسم المجموعة نفسه تُجمع في صفحة واحدة مع عناوينها',
+                                'Tables one after another with the same group name are kept on one page with their titles'))
+        fit(self.group, 220)
+        a11y(self.group, L('مجموعة جداول مرتبطة', 'Group of related tables'))
+        self.group.currentTextChanged.connect(lambda t: (self._flag('group', t.strip()), self.changed.emit()))
+        from ..core import tablefit
+        self.fitting = QComboBox()
+        self.fitting.addItem(L('العرض كما هو', 'Width as it is'), 0)
+        for i, step in enumerate(tablefit.STEPS[:3] if section else tablefit.STEPS, 1):
+            self.fitting.addItem(('+ ' if i > 1 else '') + L(*tablefit.STEP_NAMES[step]), i)
+        self.fitting.setCurrentIndex(min(tablefit.level(self.data), self.fitting.count() - 1))
+        self.fitting.setToolTip(L('ملاءمة الجدول لعرض الصفحة: كل خطوة تضيف إلى ما قبلها (يختارها المدقق تلقائياً عند القص)',
+                                  'Fitting the table to the page width: each step adds to those before it (the checker picks it when a table is cut off)'))
+        fit(self.fitting, 200)
+        a11y(self.fitting, L('ملاءمة الجدول لعرض الصفحة', 'Fitting the table to the page width'))
+        self.fitting.currentIndexChanged.connect(lambda i: (tablefit.set_level(self.data, i), self.changed.emit()))
         self.grid = QTableWidget()
         self.grid.setWordWrap(True)
         self.grid.verticalHeader().setDefaultSectionSize(30)
@@ -460,9 +815,18 @@ class TableEditor(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(flow_row([self.preset, self.lang, self.numbered, self.bold]))
+        lay.addWidget(flow_row([self.keep, self.group, self.fitting]))
         lay.addWidget(self.grid)
         lay.addWidget(flow_row([cols, addr, delr, up, down, paste, colors]))
         self.fill()
+
+    group_names = []                     # set by the editor: the group names used in the manual
+
+    def _flag(self, key, value):
+        if value:
+            self.data[key] = value
+        else:
+            self.data.pop(key, None)
 
     def edit_colors(self):
         design = TableEditor.design_colors or {k: TABLE_THEMES['blue'][1][k] for k in TABLE_COLORS}
@@ -642,6 +1006,7 @@ class BlockWidget(QFrame):
     focused = Signal(object)
     insert_after = Signal(object)
     table_colors = Signal(dict)
+    active = Signal(object)              # the block being worked in (the formatting bar's «the block»)
 
     def __init__(self, ctx, block):
         super().__init__()
@@ -715,6 +1080,7 @@ class BlockWidget(QFrame):
                 e.apply_direction(self.align.currentData() or '')
                 e.textChanged.connect(lambda *_: self.changed.emit())
                 e.focused.connect(self.focused.emit)
+                e.focused.connect(lambda *_: self.active.emit(self))
                 e.align_requested.connect(self._align_to)
                 e.extra_menu = self.fill_menu
             row = QHBoxLayout()
@@ -731,6 +1097,8 @@ class BlockWidget(QFrame):
             self.table = TableEditor(dict(d) if d.get('columns') else table_data('custom'))
             self.table.changed.connect(lambda *_: self.changed.emit())
             self.table.colors_for_all.connect(self.table_colors.emit)
+            self.table.grid.currentCellChanged.connect(lambda *_: self.active.emit(self))
+            self.table.grid.cellClicked.connect(lambda *_: self.active.emit(self))
             self.body.addWidget(self.table)
         elif k == 'links':
             self.links = LinksEditor(d.get('items') or [])
@@ -1105,7 +1473,7 @@ class SectionForm(QWidget):
             self.table.deleteLater()
             self.table = None
         if s['kind'] == 'table':
-            self.table = TableEditor(dict(d) if d.get('columns') else table_data('custom'))
+            self.table = TableEditor(dict(d) if d.get('columns') else table_data('custom'), section=True)
             self.table.changed.connect(lambda *_: self.changed.emit())
             self.table.colors_for_all.connect(self.table_colors.emit)
             self.table_lay.addWidget(self.table)
@@ -1427,6 +1795,8 @@ class EditorTab(QWidget):
         self.form.changed.connect(self._touch)
         self.form.table_colors.connect(self.colors_for_all_tables)
         self.fmt = FormatBar()
+        self.fmt.host = self
+        self.cur_block = None
         self.block_list = QVBoxLayout()
         self.block_list.setSpacing(8)
         self._stored, self._first, self._shown_n = [], 0, 0      # the section's blocks; the open page of them
@@ -1726,6 +2096,7 @@ class EditorTab(QWidget):
         w.insert_after.connect(lambda src: self._add_block_menu(self.blocks.index(src) + 1))
         w.table_colors.connect(self.colors_for_all_tables)
         w.focused.connect(self.fmt.set_target)
+        w.active.connect(self._block_active)
         if at is None:
             self.block_list.addWidget(w)
             self.blocks.append(w)
@@ -1839,8 +2210,39 @@ class EditorTab(QWidget):
             self.ctx.window.design.load_manual(self.mid, keep_history=True)
         self.refresh_preview(force=True)
 
+    def _block_active(self, w):
+        self.cur_block = w
+
+    def current_block_index(self):
+        """The number in the section of the block being worked in, or None."""
+        w = self.cur_block
+        if w is None or not _alive(w) or w not in self.blocks:
+            return None
+        return self._first + self.blocks.index(w)
+
+    def after_format(self, text):
+        """The formatting bar changed blocks in the database: what is open is drawn again from it."""
+        self.dirty = False
+        keep, first = self.sid, self._first
+        self.sid = None
+        self.reload_tree(select=keep)
+        if first and keep:
+            self._show_block_page(first)
+        self.refresh_preview(force=True)
+        self.saved_label.setText(text)
+        if self.ctx.window:
+            self.ctx.window.statusBar().showMessage(text, 4000)
+
     def _design_table_colors(self):
         m = self.db.manual(self.mid) if self.mid else None
+        groups = set()
+        if m:
+            for s, _d in self.db.flat(self.mid, active_only=False):
+                for b in self.db.blocks(s['id']):
+                    g = (b.get('data') or {}).get('group') if b['kind'] == 'table' else None
+                    if isinstance(g, str) and g.strip():
+                        groups.add(g.strip())
+        TableEditor.group_names = sorted(groups)
         c = layout_with_defaults(m['layout'] if m else None)['colors']
         TableEditor.design_colors = {k: c.get(dk) or TABLE_THEMES['blue'][1][k] for k, (dk, _n) in TABLE_COLORS.items()}
 

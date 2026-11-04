@@ -84,6 +84,12 @@ RULES = {
     'table_as_text': ('tables', 'warning', False, True, ('جدول يحمل نصاً طويلاً (تنسيق من Word وليس جدولاً)', 'Table holding long text (Word layout, not a table)')),
     'table_wide': ('tables', 'warning', False, True, ('الجدول أعرض من الصفحة', 'Table wider than the page')),
     'table_tall_cell': ('tables', 'info', True, True, ('خلية طويلة لا تنقسم بين صفحتين', 'Long cell that cannot run over two pages')),
+    'table_no_border': ('tables', 'warning', False, True, ('حدود الجدول مفقودة أو لا تكاد تُرى', 'Table borders missing or hardly visible')),
+    'table_no_shade': ('tables', 'warning', False, True, ('رأس الجدول بلا تظليل يميّزه', 'Table header row without shading')),
+    'table_contrast': ('tables', 'warning', False, True, ('تباين ضعيف بين نص الجدول وخلفيته', 'Weak contrast between table text and its background')),
+    'table_clipped': ('tables', 'error', False, True, ('جدول مقصوص في الصفحة المطبوعة', 'Table cut off on the printed page')),
+    'table_split_short': ('tables', 'warning', False, True, ('جدول قصير انقسم بين صفحتين', 'Short table split over two pages')),
+    'table_caption_apart': ('tables', 'warning', False, True, ('عنوان الجدول في صفحة والجدول في التالية', 'Table title on one page, the table on the next')),
     'img_missing': ('images', 'error', True, True, ('صورة محذوفة من المكتبة', 'Image removed from the library')),
     'img_lowres': ('images', 'warning', False, True, ('دقة الصورة منخفضة للطباعة', 'Image resolution low for printing')),
     'img_no_dims': ('images', 'info', True, True, ('أبعاد الصورة غير محفوظة', 'Image size not stored')),
@@ -450,7 +456,7 @@ def check_block(cx, sid, i, b, blocks, sec):
         out += check_image(cx, sid, i, d)
     if k in TEXT_KINDS:
         for side, text in (('ar', ar), ('en', en)):
-            cols = {c.lower() for c in re.findall(r'color:\s*(#[0-9a-fA-F]{3,8})', text)}
+            cols = {c.lower() for c in re.findall(r'(?<![-\w])color:\s*(#[0-9a-fA-F]{3,8})', text)}
             odd = {c for c in cols if c not in cx.palette and c not in ('#000', '#000000')}
             if odd:
                 out.append(_issue('inline_colors', sid, i, [side], sample=short(text),
@@ -557,6 +563,75 @@ def check_table(cx, sid, b, d, base):
             if any(len(plain((x or {}).get('ar') or '') + plain((x or {}).get('en') or '')) > 900 for x in row if isinstance(x, dict)):
                 out.append(_issue('table_tall_cell', sid, b, base, fix=('السماح بانقسام الصف بين صفحتين', 'Let rows run over two pages')))
                 break
+    out += check_table_look(cx, sid, b, d, base)
+    return out
+
+
+# ── table colours ────────────────────────────────────────────────────
+def luminance(hexcol):
+    """The relative luminance of a colour «#RRGGBB» (the measure of the accessibility guidelines)."""
+    h = (hexcol or '#000000').lstrip('#')
+    if len(h) == 3:
+        h = ''.join(c * 2 for c in h)
+    try:
+        rgb = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+    except ValueError:
+        return 0.0
+    lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+
+def contrast(a, b):
+    """The contrast ratio of two colours: 1 (the same) to 21 (black on white)."""
+    la, lb = luminance(a), luminance(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+def readable_on(bg):
+    """Black or white, whichever reads better on ``bg``."""
+    return '#000000' if contrast('#000000', bg) >= contrast('#FFFFFF', bg) else '#FFFFFF'
+
+
+TEXT_CONTRAST = 4.5          # the least contrast for ordinary text (accessibility guidelines, level AA)
+BORDER_CONTRAST = 1.3        # a border lighter than this on white does not show on paper
+SHADE_CONTRAST = 1.12        # a header background this close to white is not a shading
+
+
+def table_colors(lay, d):
+    """The colours a table prints with: its own, else the manual's."""
+    c = lay['colors']
+    own = d.get('colors') or {}
+    out = {'head': c['table_head'], 'head_text': c['table_head_text'], 'stripe': c.get('table_stripe', '#F6F9FD'),
+           'border': c.get('table_border', c['box_border']), 'text': c.get('table_text', c['text'])}
+    for k, v in own.items():
+        if k in out and isinstance(v, str) and re.fullmatch(r'#[0-9a-fA-F]{6}', v):
+            out[k] = v
+    look = d.get('look') or {}
+    if isinstance(look.get('color'), str) and re.fullmatch(r'#[0-9a-fA-F]{6}', look['color']):
+        out['text'] = look['color']
+    return out
+
+
+def check_table_look(cx, sid, b, d, base):
+    out = []
+    tc = table_colors(cx.lay, d)
+    if d.get('borders') is False or contrast(tc['border'], '#FFFFFF') < BORDER_CONTRAST:
+        out.append(_issue('table_no_border', sid, b, base, params={},
+                          fix=('إظهار الحدود بلون يُرى عند الطباعة', 'Show the borders in a colour that prints')))
+    if contrast(tc['head'], '#FFFFFF') < SHADE_CONTRAST:
+        out.append(_issue('table_no_shade', sid, b, base,
+                          fix=('تظليل رأس الجدول بلون الدليل', 'Shade the header row in the manual colour')))
+    weak = []
+    if contrast(tc['head_text'], tc['head']) < TEXT_CONTRAST:
+        weak.append(('نص الرأس على خلفيته', 'header text on its background', round(contrast(tc['head_text'], tc['head']), 1)))
+    low = min(contrast(tc['text'], '#FFFFFF'), contrast(tc['text'], tc['stripe']))
+    if low < TEXT_CONTRAST:
+        weak.append(('نص الخلايا على خلفيتها', 'cell text on its background', round(low, 1)))
+    if weak:
+        out.append(_issue('table_contrast', sid, b, base,
+                          msg=('تباين ضعيف: ' + '، '.join(f'{a} ({r}:1)' for a, _e, r in weak) + ' والمناسب 4.5:1 فأكثر',
+                               'Weak contrast: ' + ', '.join(f'{e} ({r}:1)' for _a, e, r in weak) + '; 4.5:1 or more reads well'),
+                          fix=('اختيار لون نص يُقرأ على خلفيته (أسود أو أبيض)', 'Use a text colour that reads on its background (black or white)')))
     return out
 
 
@@ -783,6 +858,9 @@ def from_audit(db, manual_id, audit, prefs=None, workflow=False):
                 continue
             grouped[(it['t'], it['sid'])] = it = dict(it)
         items.append(it)
+    clipped = set()
+    cap_pages = {it.get('page') for it in items if it.get('t') == 'tcap'}
+    split_tables = {it.get('b') for it in items if it.get('t') == 'tsplit' and it.get('b')}
     for it in items:
         t, page, sid = it.get('t'), it.get('page'), it.get('sid')
         b = int(it['b'].split(':')[1]) if it.get('b') else None
@@ -796,12 +874,32 @@ def from_audit(db, manual_id, audit, prefs=None, workflow=False):
         is_table = (blk and blk.get('kind') == 'table') or (b is None and sid and (db.section(sid) or {}).get('kind') == 'table')
         is_image = blk and blk.get('kind') == 'image'
         rule = {'x': 'lay_overflow_x', 'y': 'lay_overflow_y', 'cell': 'lay_cell', 'orphan': 'lay_orphan', 'lost': 'lay_lost', 'dup': 'lay_dup',
-                'blank': 'lay_blank', 'sparse': 'lay_sparse'}.get(t)
+                'blank': 'lay_blank', 'sparse': 'lay_sparse', 'tsplit': 'table_split_short', 'tcap': 'table_caption_apart'}.get(t)
+        if t in ('x', 'cell') and is_table:
+            rule = 'table_clipped'
         if not rule:
             continue
+        if t in ('x', 'cell') and is_table and (sid, b) in clipped:
+            continue                         # one point per table (its width and its cells)
+        if t == 'orphan' and (page in cap_pages or it.get('b') in split_tables):
+            continue                         # the same place is named by «table title apart» / «short table split»
         fix, params, msg = None, {}, None
         if t in ('x', 'cell') and is_table:
-            fix, params = ('تصغير خط الجدول وتضييق خلاياه', 'Smaller table font and tighter cells'), {'table': True}
+            clipped.add((sid, b))
+            fix, params = (('إصلاح تدريجي يتوقف عند أول خطوة كافية: تضييق الخلايا، ثم تصغير الخط، ثم كسر الكلمات الطويلة، ثم صفحة أفقية',
+                            'A fix in steps that stops at the first one enough: tighter cells, then a smaller font, then long '
+                            'words broken, then a landscape page'), {'fit': True})
+            msg = (('عرض الجدول يتجاوز الصفحة' + (f' بنحو {it["mm"]} مم' if it.get('mm') else '') if t == 'x'
+                    else 'كلمة أو رابط أعرض من خلية الجدول فيُقص'),
+                   ('The table runs past the page' + (f' by about {it["mm"]} mm' if it.get('mm') else '') if t == 'x'
+                    else 'A word or link wider than its cell is cut off'))
+        elif t == 'tsplit':
+            fix, params = ('إبقاء الجدول في صفحة واحدة', 'Keep the table on one page'), {'keep': True}
+            msg = (f'جدول قصير بدأ في الصفحة {page} وأكمل في التالية', f'A short table starts on page {page} and goes on to the next')
+        elif t == 'tcap':
+            hb = int(it['hb'].split(':')[1]) if it.get('hb') and it['hb'].split(':')[0] == str(sid) else b
+            fix, params = ('نقل العنوان مع الجدول إلى الصفحة التالية', 'Move the title with its table to the next page'), \
+                {'break_before': hb}
         elif t == 'x' and is_image:
             fix, params = ('تصغير الصورة إلى 80% من العرض', 'Reduce the image to 80% of the width'), {'width': 80}
         elif t in ('lost', 'dup') and sid:
@@ -834,7 +932,7 @@ def from_audit(db, manual_id, audit, prefs=None, workflow=False):
             if not fix and it.get('nextsid') and (db.section(it['nextsid']) or {}).get('new_page'):
                 sid = it['nextsid']
                 fix, params = ('إلغاء «صفحة جديدة» للقسم الذي بعدها', 'Turn off «new page» for the section after it'), {'new_page': False}
-        if t in ('x', 'y') and it.get('mm'):
+        if t in ('x', 'y') and it.get('mm') and rule != 'table_clipped':
             title = RULES[rule][4]
             msg = (f'{title[0]} بنحو {it["mm"]} مم', f'{title[1]} by about {it["mm"]} mm')
         if t == 'lost' and it.get('never'):
@@ -1056,7 +1154,17 @@ class Fixer:
         self.edit_text(x, lambda t: map_text(t, lambda p: to_digits(p, x['params']['style'])))
 
     def fix_inline_colors(self, x):
-        self.edit_text(x, lambda t: re.sub(r'<span style="[^"]*">(.*?)</span>', r'\1', t, flags=re.S))
+        # the text colour only: a font, a size or a highlight chosen for the words stays
+        def drop(m):
+            css = ';'.join(p for p in m.group(1).split(';') if p.strip() and not re.match(r'\s*color\s*:', p))
+            return f'<span style="{css}">' if css else '<span>'
+
+        def strip(t):
+            t = re.sub(r'<span style="([^"]*)">', drop, t)
+            while re.search(r'<span>((?:(?!<span[ >]).)*?)</span>', t, flags=re.S):
+                t = re.sub(r'<span>((?:(?!<span[ >]).)*?)</span>', r'\1', t, flags=re.S)
+            return t
+        self.edit_text(x, strip)
 
     def fix_swapped(self, x):
         t = self.target(x)
@@ -1229,6 +1337,71 @@ class Fixer:
     def fix_table_tall_cell(self, x):
         self.table_data(x)['split_rows'] = True
 
+    def _design(self):
+        return layout_with_defaults(self.m['layout'] if self.m else {})
+
+    def _own_colors(self, d, **set_):
+        own = dict(d.get('colors') or {})
+        own.update(set_)
+        d['colors'] = own
+
+    def fix_table_no_border(self, x):
+        d = self.table_data(x)
+        d.pop('borders', None)
+        c = self._design()['colors']
+        design = c.get('table_border', c['box_border'])
+        own = dict(d.get('colors') or {})
+        if contrast(design, '#FFFFFF') >= BORDER_CONTRAST:
+            own.pop('border', None)
+        else:
+            own['border'] = '#9FB3D1'
+        d['colors'] = own
+
+    def fix_table_no_shade(self, x):
+        d = self.table_data(x)
+        c = self._design()['colors']
+        head = c['table_head'] if contrast(c['table_head'], '#FFFFFF') >= SHADE_CONTRAST else '#0B3D91'
+        tc = table_colors(self._design(), d)
+        text = tc['head_text'] if contrast(tc['head_text'], head) >= TEXT_CONTRAST else readable_on(head)
+        self._own_colors(d, head=head, head_text=text)
+
+    def fix_table_contrast(self, x):
+        d = self.table_data(x)
+        tc = table_colors(self._design(), d)
+        if contrast(tc['head_text'], tc['head']) < TEXT_CONTRAST:
+            self._own_colors(d, head_text=readable_on(tc['head']))
+        if min(contrast(tc['text'], '#FFFFFF'), contrast(tc['text'], tc['stripe'])) < TEXT_CONTRAST:
+            dark = '#1E293B'
+            text = dark if min(contrast(dark, '#FFFFFF'), contrast(dark, tc['stripe'])) >= TEXT_CONTRAST else '#000000'
+            self._own_colors(d, text=text)
+            if (d.get('look') or {}).get('color'):
+                d['look'] = dict(d['look'], color=text)
+            if x['b'] is not None:
+                b = self.bl(x['sid'])[x['b']]
+                st = dict(b.get('style') or {})
+                for k in (None, 'ar', 'en'):
+                    part = st if k is None else st.get(k)
+                    if isinstance(part, dict) and part.get('color'):
+                        part['color'] = text
+                b['style'] = st
+
+    def fix_table_split_short(self, x):
+        self.table_data(x)['keep'] = True
+
+    def fix_table_clipped(self, x):
+        """One step further on the way of ``tablefit.STEPS`` (the checker page measures again after each step)."""
+        from . import tablefit
+        d = self.table_data(x)
+        step = tablefit.next_step(d, self.m['layout'] if self.m else {}, None if x['b'] is not None else self.sec(x['sid']).get('style'))
+        if step is None:
+            raise ValueError('no further step')
+        if step == 'landscape' and x['b'] is None:
+            st = dict(self.sec(x['sid']).get('style') or {})
+            st['orientation'] = 'landscape'
+            self.set_sec(x['sid'], style=st)
+        else:
+            tablefit.apply_step(d, step)
+
     # images
     def fix_img_lowres(self, x):
         self.bl(x['sid'])[x['b']].setdefault('data', {})['width'] = x['params']['width']
@@ -1259,6 +1432,7 @@ class Fixer:
         elif 'new_page' in p:
             self.set_sec(x['sid'], new_page=1 if p['new_page'] else 0)
     fix_lay_overflow_x = fix_lay_overflow_y = fix_lay_cell = fix_lay_orphan = fix_lay_lost = fix_lay_dup = fix_lay_blank = _layout_fix
+    fix_table_caption_apart = _layout_fix
 
 
 def apply(db, manual_id, issues, note='doctor_fix'):

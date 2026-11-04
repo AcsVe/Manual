@@ -51,11 +51,37 @@ AUDIT_JS = r"""
    }
    return n;
  }
- out.pages=pages.length;
+ out.pages=pages.length; out.pmap=[];
  var sel='.tbar,.h-sub,.blk,table.t,.figure,.org,.callout,.quote,.toc .row,.links,.chapter-page,.history,ul,ol,img';
+ var tpages={}, theight={}, thead={}, tfirst={}, H=0, prevLast=null;
  pages.forEach(function(pg, pi){
-   var area=pg.querySelector('.pagedjs_page_content'); if(!area) return;
+   var area=pg.querySelector('.pagedjs_page_content'); if(!area){out.pmap.push({b:[],s:[]}); return;}
    var A=area.getBoundingClientRect(), n=pi+1, W=A.right-A.left;
+   if(!H) H=A.bottom-A.top;
+   // which blocks and sections have something on this page (used to format a range of pages)
+   var pb={}, ps={};
+   area.querySelectorAll('[data-b]').forEach(function(e){var q=e.getBoundingClientRect();
+     if(q.height>0 && q.left<A.right-2 && q.top<A.bottom-2) pb[e.getAttribute('data-b')]=1;});
+   area.querySelectorAll('[data-sid]').forEach(function(e){var q=e.getBoundingClientRect();
+     if(q.height>0 && q.left<A.right-2 && q.top<A.bottom-2) ps[e.getAttribute('data-sid')]=1;});
+   out.pmap.push({b:Object.keys(pb), s:Object.keys(ps).map(function(x){return parseInt(x);})});
+   // the parts of each table on the pages (a short table split over two pages)
+   area.querySelectorAll('table.t[data-b]').forEach(function(tb){var q=tb.getBoundingClientRect();
+     if(q.height<1||q.left>=A.right-2||q.top>=A.bottom-2) return;
+     var k=tb.getAttribute('data-b'); (tpages[k]=tpages[k]||[]).push(n);
+     theight[k]=(theight[k]||0)+Math.min(q.bottom,A.bottom)-q.top;
+     var th=tb.querySelector('thead'); if(th) thead[k]=th.getBoundingClientRect().height;
+     if(!tfirst[k]) tfirst[k]=ref(tb,{t:'tsplit',page:n});});
+   // a title at the foot of the page before, and its table at the head of this one
+   var top=null, topY=1e9;
+   area.querySelectorAll(sel).forEach(function(el){var r=el.getBoundingClientRect();
+     if(r.width<1||r.height<1||r.left>=A.right-2||r.top>=A.bottom-2) return;
+     if(r.top<topY-1){topY=r.top; top=el;}});
+   if(top && prevLast && top.matches('table.t') && !top.hasAttribute('data-split-from') && top.hasAttribute('data-b')){
+     var hb=prevLast.closest('[data-b]');
+     out.items.push(ref(top,{t:'tcap',page:n-1,hb:hb?hb.getAttribute('data-b'):null}));
+   }
+   prevLast=null;
    // what lies outside the page (Paged.js keeps it beyond the right edge): printed elsewhere, or lost
    area.querySelectorAll('[data-ref]').forEach(function(el){
      if(!el.textContent.trim() && !el.querySelector('img')) return;
@@ -105,12 +131,17 @@ AUDIT_JS = r"""
        var ns=next.closest('[data-sid]')||next; o.nextsid=parseInt(ns.getAttribute('data-sid'))||null; }
      out.items.push(o); return;
    }
+   prevLast=(last && last.matches('.h-sub') && !last.closest('.tbar')) ? last : null;
    var secEl=last?last.closest('[data-sid]'):null;
    if(!chapter && last && last.closest('.tbar,.h-sub') && secEl && secEl.hasAttribute('data-split-to') && pi<pages.length-1)
      out.items.push(ref(last,{t:'orphan',page:n}));
    else if(!chapter && pi<pages.length-1 && (lastBottom-A.top)/A.height<0.15)
      out.items.push(ref(last,{t:'sparse',page:n,fill:Math.round(100*(lastBottom-A.top)/A.height)}));
  });
+ for(var k in tpages){             // a table shorter than a page that still runs over two
+   var parts=tpages[k].length; if(parts<2) continue;
+   var h=theight[k]-(parts-1)*(thead[k]||0);
+   if(h<H*0.8){var o=tfirst[k]; o.parts=parts; out.items.push(o);} }
  for(var k in hidden){ if(!seen[k]) out.items.push(hidden[k]); }
  var km=window.__kmap||{}, gone={};          // text that never reached any page (the layout stopped early)
  for(var k in km){ if(need[k]===undefined){ var r=km[k][0].split(':'), sid=parseInt(r[0]);
