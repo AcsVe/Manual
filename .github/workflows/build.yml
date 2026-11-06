@@ -64,7 +64,11 @@ jobs:
         if: github.ref == 'refs/heads/main'
         shell: bash
         run: |
-          gh release view latest >/dev/null 2>&1 || gh release create latest --title "ManualBuilder — آخر إصدار" --notes "يتحدّث تلقائياً مع كل بناء. حمِّل ManualBuilderSetup.exe وشغّله."
-          gh release upload latest dist/ManualBuilderSetup.exe --clobber
+          gh release view ${PFX}latest >/dev/null 2>&1 || gh release create ${PFX}latest --title "ManualBuilder — آخر إصدار" --notes "يتحدّث تلقائياً مع كل بناء. حمِّل ManualBuilderSetup.exe وشغّله."
+          gh release upload ${PFX}latest dist/ManualBuilderSetup.exe --clobber
         env:
-          GH_TOKEN: ${{ github.token }}
+          # DOWNLOADS_TOKEN (رمز بصلاحية الكتابة على AcsVe/downloads): يُنشر الملف في مستودع التحميلات العام
+          # بوسم يبدأ باسم النظام؛ وبدونه يُنشر هنا كما كان (فلا يتوقف البناء قبل إضافة الرمز)
+          GH_TOKEN: ${{ secrets.DOWNLOADS_TOKEN || github.token }}
+          GH_REPO: ${{ secrets.DOWNLOADS_TOKEN && 'AcsVe/downloads' || github.repository }}
+          PFX: ${{ secrets.DOWNLOADS_TOKEN && 'manual-' || '' }}
